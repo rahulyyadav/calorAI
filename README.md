@@ -9,7 +9,7 @@ This repository deliberately separates the **agent core** from its delivery chan
 
 ## Current status
 
-Phase 0 is complete: the source brief is preserved, requirements are mapped, the system boundary is defined, and the work is split into implementation phases. No claim is made yet that the agent is implemented.
+Phases 0 and 1 are complete. The repository contains a locally runnable LangGraph vertical slice with SQLite persistence, deterministic nutrition reference data, typed meal tools, timezone-correct daily totals, and a CLI. Corrections, persistent memory, vision, and WhatsApp arrive in subsequent phases and are not claimed as implemented yet.
 
 Start with:
 
@@ -40,6 +40,36 @@ Start with:
 
 Exact provider/model selections will be recorded after a short latency-and-quality spike rather than hard-coded prematurely.
 
+## Quick start
+
+Python 3.11 or newer is required.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e '.[dev]'
+cp .env.example .env
+calorai
+```
+
+Try:
+
+```text
+had 2 parathas and chai for breakfast
+how am I doing today?
+what did I eat today?
+```
+
+Run the verification suite:
+
+```bash
+ruff check .
+mypy src
+pytest --cov=calorai_agent --cov-report=term-missing
+```
+
+Phase 1 deliberately uses a small deterministic food table. This keeps the local slice fast, testable, and free of API keys while the provider-backed structured planner is introduced later.
+
 ## Repository shape
 
 ```text
@@ -64,4 +94,3 @@ The strongest demo path will show:
 ## Original constraints
 
 The supplied brief allows a CLI and does not require WhatsApp integration. We are intentionally adding WhatsApp because it demonstrates the actual product surface, but it is isolated so it cannot endanger the required local evaluator experience. The task's stated 6-8 hour budget will be tracked honestly once implementation begins.
-

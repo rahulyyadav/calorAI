@@ -14,7 +14,7 @@ The plan is ordered to maximize evaluator value early. Each phase ends with a de
 
 **Exit check:** another engineer can explain what will be built, why, and in what order.
 
-## Phase 1 - Thin vertical slice
+## Phase 1 - Thin vertical slice (complete)
 
 **Outcome:** a user can log a text meal and retrieve today's totals through the CLI.
 
@@ -26,6 +26,8 @@ The plan is ordered to maximize evaluator value early. Each phase ends with a de
 - Add a minimal LangGraph route from message to tools to response.
 
 **Evidence:** clean-clone setup test; persistence test; totals test.
+
+Implemented evidence: strict type checking passes, lint/format checks pass, nine tests pass with 82% package coverage, and a packaged CLI smoke test logs and retrieves a persisted meal. The Phase 1 planner intentionally uses deterministic reference foods; provider-backed interpretation remains a later concern.
 
 ## Phase 2 - Corrections and conversational judgment
 
@@ -107,4 +109,3 @@ The plan is ordered to maximize evaluator value early. Each phase ends with a de
 ## Time-box discipline
 
 For the official 6-8 hour exercise, phases 1-4 and measurable latency are the core. WhatsApp is an intentional enhancement, but the CLI and required behaviors remain shippable if external Meta setup consumes too much time. LangSmith, streaming, vector search, and elaborate deployment are strictly optional.
-

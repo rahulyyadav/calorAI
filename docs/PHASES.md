@@ -158,7 +158,7 @@ persisted state.
 
 **Evidence:** end-to-end test-number demo for text, correction, totals, and photo-plus-caption.
 
-Implemented evidence: 325 tests pass at 95% package coverage with ruff and strict mypy clean.
+Implemented evidence: 338 tests pass at 95% package coverage with ruff and strict mypy clean.
 `whatsapp.py` decides nothing about meals; it decides only whether an event may be trusted. An
 `X-Hub-Signature-256` is an HMAC-SHA256 of the *exact raw bytes* under the app secret, compared in
 constant time before the body is parsed, so re-serializing the JSON cannot make a forged delivery
@@ -174,15 +174,24 @@ answered with one honest sentence naming what it sounded like, and because decli
 inbound ledger a redelivered voice note declines once. Meta's `wamid` is the deduplication key, and
 a message that arrives without one is fingerprinted from its own content, so a retry is still one
 event and at most one meal. `WebhookApplication` acknowledges first and works behind that ack
-through an injectable executor (inline in tests, a worker in the shell), sends the read receipt and
-typing indicator best-effort before the reply, and answers `INTERNAL_FAILURE_REPLY` when the agent
-itself raises — one user's failure neither stops the rest of the delivery nor pretends a meal was
-logged. `GraphClient` keeps the token in a header only, because URLs are copied into access logs,
-and reports a failure by its class rather than echoing a provider message that can carry one;
-`WhatsAppMediaSource` holds downloaded bytes to the same jpeg/png/webp signature test and 8 MB cap
-as a CLI photo. The HTTP shell is a stdlib `ThreadingHTTPServer` on a configurable path — 404 off
-path, 401 and 403 on the way in, access lines at debug level so no body or token reaches a log —
-and it added no dependency. `main()` refuses to start on half a configuration: any one of the four
+through an injectable executor whose default is the production thread pool — a test opts into the
+inline one, a deployment never does — and one test proves the `200` is written while the turn is
+still blocked inside the planner. The message is marked seen with Meta's typing indicator carried
+on that same read request, because the Cloud API has no standalone typing call. Every item of a
+delivery is guarded on its own, so a locked database or a lost reply costs one message and not the
+batch: the user hears `I could not finish that message`, and the ledger row that turn leaves open
+is closed with that same honest reply rather than promising "still working on it" to every retry
+forever. A message this adapter fingerprinted because Meta sent no id is answered but never marked
+read, since there is no such message to receipt. `GraphClient` keeps the token in a header only,
+because URLs are copied into access logs, reports a failure by its class rather than echoing a
+provider message that can carry one, and follows a media pointer only when it names an `https` url,
+because the bearer token travels on that second request; `WhatsAppMediaSource` holds downloaded
+bytes to the same jpeg/png/webp signature test and 8 MB cap as a CLI photo. The HTTP shell is a
+stdlib `ThreadingHTTPServer` on a configurable path — 404 off path, 401 and 403 on the way in, a
+declared body over the cap refused with 413 and a non-numeric `Content-Length` with 400 before any
+of it is read, and access lines at debug level cut at the first `?` because the handshake carries
+the verify token in the query string, so no body or token reaches a log — and it added no
+dependency. `main()` refuses to start on half a configuration: any one of the four
 WhatsApp secrets missing, or an empty allow-list, exits 2 with the instructions to fix it. The
 secret itself stays out of the repository: `.env.example` lists the Phase 5 keys as empty values
 and `.env` remains gitignored. Known boundary: the live test-number walkthrough (text, correction,

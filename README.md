@@ -132,9 +132,13 @@ cloudflared tunnel --url http://localhost:8080   # or: ngrok http 8080
 What the transport does and does not decide:
 
 - A delivery is only accepted when `X-Hub-Signature-256` matches an HMAC of the exact raw body
-  under your app secret. Anything else is refused before it is parsed.
+  under your app secret. Anything else is refused before it is parsed, and a body declaring more
+  than a megabyte is refused before any of it is read.
 - The handshake and the acknowledgement are fast: Meta is answered with a `200` first, and the
-  meal is worked on behind it, so a slow model never turns into a retry storm.
+  meal is worked on on a worker thread behind it, so a slow model never turns into a retry storm.
+- The read receipt carries Meta's typing indicator on the same request — the Cloud API has no
+  separate typing call — and a message that arrives without a `wamid` is answered without being
+  marked read, because there is no message id to receipt.
 - Meta's retries carry the same message id, so a redelivered message is the same inbound event and
   logs at most one meal.
 - A photo's bytes come from the Graph API and pass the same signature and size checks as a CLI

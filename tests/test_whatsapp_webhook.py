@@ -10,7 +10,10 @@ import hashlib
 import hmac
 import http.client
 import json
+import logging
+import sqlite3
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -31,7 +34,9 @@ from calorai_agent.vision import VisionInterpreter
 from calorai_agent.whatsapp import GraphClient, WhatsAppError, WhatsAppMediaSource
 from calorai_agent.whatsapp_server import (
     INTERNAL_FAILURE_REPLY,
+    InlineExecutor,
     WebhookApplication,
+    WorkerExecutor,
     serve,
 )
 
@@ -83,6 +88,7 @@ class FakeGraph(GraphClient):
         self.receipts_fail = receipts_fail
         self.replies: list[tuple[str, str]] = []
         self.statuses: list[str] = []
+        self.receipt_ids: list[str] = []
         self.download_calls: list[str] = []
 
     def send_text(self, to: str, body: str) -> None:
@@ -90,13 +96,11 @@ class FakeGraph(GraphClient):
             raise WhatsAppError("graph request failed: ConnectError")
         self.replies.append((to, body))
 
-    def mark_seen(self, message_id: str) -> None:
+    def mark_seen(self, message_id: str, *, typing: bool = False) -> None:
         if self.receipts_fail:
             raise WhatsAppError("graph request failed: ConnectError")
-        self.statuses.append("read")
-
-    def typing_on(self, message_id: str) -> None:
-        self.statuses.append("typing")
+        self.receipt_ids.append(message_id)
+        self.statuses.append("read+typing" if typing else "read")
 
     def download(self, media_id: str) -> bytes:
         self.download_calls.append(media_id)
@@ -203,7 +207,9 @@ def _app(
         repository=repository,
         timezone=ZONE,
         allowed_users=frozenset(allowed),
-        executor=executor,
+        # Tests want the answer inside the call they just made; the production default is a worker,
+        # and `test_the_production_answerer_runs_behind_the_acknowledgement` holds that open.
+        executor=executor if executor is not None else InlineExecutor(),
     )
     return application, client
 
@@ -319,7 +325,8 @@ def test_a_read_receipt_and_typing_indicator_are_sent_before_the_reply(
     application, graph = _app(repository)
     _deliver(application, _text("1 idli"))
 
-    assert graph.statuses == ["read", "typing"]
+    assert graph.statuses == ["read+typing"]
+    assert graph.receipt_ids == ["wamid.TXT"]
     assert len(graph.replies) == 1
 
 
@@ -575,12 +582,16 @@ def _request(
     *,
     body: bytes | None = None,
     signature: str | None = None,
+    content_length: str | None = None,
 ) -> tuple[int, str]:
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     try:
         headers = {"Content-Type": "application/json"}
         if signature is not None:
             headers["X-Hub-Signature-256"] = signature
+        if content_length is not None:
+            # A stranger chooses this number, so it is the one thing the shell must not trust.
+            headers["Content-Length"] = content_length
         connection.request(method, target, body=body, headers=headers)
         response = connection.getresponse()
         return response.status, response.read().decode()
@@ -617,6 +628,7 @@ def test_the_http_shell_serves_the_handshake_then_the_events_on_its_configured_p
     )
     application = create_whatsapp_app(settings)
     application.client = graph
+    application.executor = InlineExecutor()
     body = _body(_text("I ate 3 idli and 1 coffee", sender="local-demo-user"))
     seen: list[tuple[int, str]] = []
 
@@ -648,6 +660,188 @@ def test_the_http_shell_serves_the_handshake_then_the_events_on_its_configured_p
     assert seen[-1][1] == "ok"
     assert "Logged" in graph.replies[0][1]
     assert len(application.repository.list_for_day("local-demo-user", DAY)) == 1
+
+
+def _live_app(tmp_path: Path) -> tuple[Settings, WebhookApplication]:
+    settings = replace(
+        _settings(
+            tmp_path,
+            whatsapp_verify_token=VERIFY,
+            whatsapp_app_secret=SECRET,
+            whatsapp_access_token="token",
+            whatsapp_phone_number_id="1000",
+            whatsapp_allowed_users=("local-demo-user",),
+        ),
+        webhook_host="127.0.0.1",
+        webhook_port=0,
+    )
+    return settings, create_whatsapp_app(settings)
+
+
+class GatedPlanner:
+    """Parses only when the test lets it, so a turn can be caught still running."""
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def parse(self, request: Any) -> Any:
+        self.started.set()
+        assert self.release.wait(5), "the turn never reached the planner"
+        return RuleBasedPlanner().parse(request)
+
+
+class OnceLocked:
+    """Fails the first user lookup the way a locked database would, then behaves normally."""
+
+    def __init__(self, inner: MealRepository) -> None:
+        self.inner = inner
+        self.locked = False
+
+    def ensure_user(self, user_id: str, timezone_name: str = "UTC") -> None:
+        if not self.locked:
+            self.locked = True
+            raise sqlite3.OperationalError("database is locked")
+        self.inner.ensure_user(user_id, timezone_name)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.inner, name)
+
+
+def _wait_for(condition: Callable[[], bool], timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not condition():
+        if time.monotonic() > deadline:
+            raise AssertionError("the condition never became true")
+        time.sleep(0.01)
+
+
+def test_the_webhook_is_acknowledged_while_the_turn_is_still_running(
+    tmp_path: Path,
+) -> None:
+    # Meta times out and retries anything slow, so a model that takes a minute must never turn into
+    # the same message worked on by two connection threads at once.
+    graph = FakeGraph()
+    settings, application = _live_app(tmp_path)
+    application.client = graph
+    planner = GatedPlanner()
+    application.agent.planner = planner
+    assert isinstance(application.executor, WorkerExecutor)
+    body = _body(_text("I ate 3 idli and 1 coffee", sender="local-demo-user"))
+    ack: list[tuple[int, str]] = []
+
+    def visit(port: int) -> None:
+        ack.append(_request(port, "POST", "/webhook", body=body, signature=_signed(body)))
+        assert planner.started.wait(5), "the worker never took the turn"
+        assert graph.replies == []
+        planner.release.set()
+        _wait_for(lambda: bool(graph.replies))
+
+    _deliver_and_stop(serve(settings, application), visit)
+
+    assert ack[0] == (200, "ok")
+    assert "Logged" in graph.replies[0][1]
+
+
+def test_the_verify_token_never_reaches_an_access_log(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    settings, application = _live_app(tmp_path)
+    application.client = FakeGraph()
+    application.executor = InlineExecutor()
+
+    def visit(port: int) -> None:
+        _request(
+            port,
+            "GET",
+            f"/webhook?hub.mode=subscribe&hub.verify_token={VERIFY}&hub.challenge=7",
+        )
+
+    with caplog.at_level(logging.DEBUG, logger="calorai_agent.whatsapp_server"):
+        _deliver_and_stop(serve(settings, application), visit)
+
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert VERIFY not in logged
+    assert "/webhook" in logged
+
+
+def test_an_absurd_declared_body_is_refused_before_any_of_it_is_read(
+    tmp_path: Path,
+) -> None:
+    settings, application = _live_app(tmp_path)
+    application.client = FakeGraph()
+    application.executor = InlineExecutor()
+    body = _body(_text("1 idli", sender="local-demo-user"))
+    seen: list[tuple[int, str]] = []
+
+    def visit(port: int) -> None:
+        seen.append(
+            _request(
+                port,
+                "POST",
+                "/webhook",
+                body=body,
+                signature=_signed(body),
+                content_length=str(10_000_000_000),
+            )
+        )
+        seen.append(
+            _request(
+                port, "POST", "/webhook", body=body, signature=_signed(body), content_length="junk"
+            )
+        )
+
+    _deliver_and_stop(serve(settings, application), visit)
+
+    assert [status for status, _ in seen] == [413, 400]
+
+
+def test_one_locked_database_turn_does_not_cost_the_rest_of_the_delivery(
+    repository: MealRepository,
+) -> None:
+    application, graph = _app(repository)
+    application.repository = OnceLocked(application.repository)  # type: ignore[assignment]
+
+    status, _ = _deliver(
+        application,
+        _text("1 idli", msg_id="wamid.1"),
+        _text("2 idli", msg_id="wamid.2"),
+        {"from": WA_USER, "id": "wamid.V", "type": "audio", "audio": {"id": "media-2"}},
+    )
+
+    assert status == 200
+    assert [reply for _, reply in graph.replies][0] == INTERNAL_FAILURE_REPLY
+    assert "Logged" in graph.replies[1][1]
+    assert "voice note" in graph.replies[2][1]
+    assert len(repository.list_for_day(WA_USER, DAY)) == 1
+
+
+def test_a_retry_of_a_failed_turn_says_the_same_true_thing(
+    repository: MealRepository,
+) -> None:
+    # Leaving the ledger row open makes every later retry promise work this process has stopped
+    # doing, which is worse than repeating the honest failure.
+    application, graph = _app(repository, planner=BoomPlanner())
+    body = _body(_text("1 idli"))
+    signature = _signed(body)
+
+    application.post(signature, body)
+    application.post(signature, body)
+
+    assert graph.replies == [(WA_USER, INTERNAL_FAILURE_REPLY)] * 2
+    assert all("still working" not in reply for _, reply in graph.replies)
+
+
+def test_a_message_with_no_wamid_is_answered_but_never_asked_to_be_marked_read(
+    repository: MealRepository,
+) -> None:
+    application, graph = _app(repository)
+    item = {"from": WA_USER, "type": "text", "text": {"body": "1 idli"}, "timestamp": str(TS)}
+
+    _deliver(application, item)
+
+    assert graph.receipt_ids == []
+    assert "Logged" in graph.replies[0][1]
 
 
 def test_the_server_refuses_to_start_on_an_incomplete_whatsapp_configuration(

@@ -25,6 +25,7 @@ from calorai_agent.whatsapp import (
     WebhookBatch,
     WhatsAppError,
     WhatsAppMediaSource,
+    is_fingerprinted_event,
     normalize_webhook,
     parse_webhook_body,
     signature_matches,
@@ -207,6 +208,20 @@ def test_an_unreadable_timestamp_costs_the_timestamp_not_the_message(stamp: Any)
     assert message.received_at is None
 
 
+def test_a_stamp_from_a_century_ahead_is_not_treated_as_a_send_time() -> None:
+    # A meal dated to year 9999 answers nothing: it leaves every totals question and every
+    # recent-meal window, so the clock the graph falls back to is the honest one.
+    far_future = int(datetime(9999, 12, 31, tzinfo=UTC).timestamp())
+    message = _normalize(_text("1 idli", timestamp=far_future))[0].messages[0]
+    assert message.received_at is None
+
+
+def test_a_stamp_a_few_minutes_ahead_of_our_own_clock_is_still_a_send_time() -> None:
+    slightly_ahead = int(datetime.now(UTC).timestamp()) + 300
+    message = _normalize(_text("1 idli", timestamp=slightly_ahead))[0].messages[0]
+    assert message.received_at is not None
+
+
 def test_a_message_retries_carry_metas_id_so_the_ledger_can_recognise_them() -> None:
     first, _ = _normalize(_text("1 idli", msg_id="wamid.SAME"))
     second, _ = _normalize(_text("1 idli", msg_id="wamid.SAME"))
@@ -230,6 +245,15 @@ def test_different_words_without_an_id_are_not_the_same_fingerprint() -> None:
         _normalize(first)[0].messages[0].external_id
         != _normalize(second)[0].messages[0].external_id
     )
+
+
+def test_a_fingerprinted_event_is_known_as_one_so_no_receipt_is_asked_for() -> None:
+    # An id this adapter invented names no WhatsApp message, so marking it read would be a request
+    # against something Meta never issued.
+    batch, _ = _normalize({"from": SENDER, "type": "text", "text": {"body": "1 idli"}})
+
+    assert is_fingerprinted_event(batch.messages[0].external_id)
+    assert not is_fingerprinted_event("wamid.TXT")
 
 
 def test_two_messages_in_one_delivery_are_two_messages() -> None:
@@ -381,6 +405,16 @@ def test_a_contact_from_an_unlisted_number_is_refused_before_it_is_answered() ->
     assert refused == (STRANGER,)
 
 
+def test_a_contact_share_from_a_listed_number_is_not_reported_as_a_refusal() -> None:
+    # A block that names a conversation but carries no message is nothing to answer, and calling a
+    # permitted number "refused" in the log would send a reviewer hunting a bug that is not there.
+    payload = _payload(contacts=[{"wa_id": SENDER, "profile": {"name": "Rahul"}}])
+    batch, refused = normalize_webhook(payload, timezone="UTC", allowed_users=ALLOWED)
+
+    assert batch.empty
+    assert refused == ()
+
+
 def test_a_text_message_with_no_words_in_it_declines() -> None:
     batch, _ = _normalize(_text("   "))
     assert batch.messages == ()
@@ -468,18 +502,20 @@ def test_the_token_travels_as_a_header_and_never_in_a_url() -> None:
     assert all("bearer-token" not in str(request.url) for request in graph.requests)
 
 
-def test_a_read_receipt_and_a_typing_indicator_use_the_documented_shapes() -> None:
+def test_a_read_receipt_carries_the_typing_indicator_the_way_meta_documents_it() -> None:
+    # Meta has no standalone typing request: the indicator is one field of a read status, and a
+    # body it does not recognise is a typing bubble the user never sees.
     graph = FakeGraph()
     graph.client.mark_seen("wamid.1")
-    graph.client.typing_on("wamid.1")
+    graph.client.mark_seen("wamid.2", typing=True)
 
     assert graph.sent_bodies == [
         {"messaging_product": "whatsapp", "status": "read", "message_id": "wamid.1"},
         {
             "messaging_product": "whatsapp",
-            "status": "typing",
-            "message_id": "wamid.1",
-            "typing": {"typing": True},
+            "status": "read",
+            "message_id": "wamid.2",
+            "typing_indicator": {"type": "text"},
         },
     ]
 
@@ -529,6 +565,18 @@ def test_a_pointer_with_no_download_url_says_so(body: bytes) -> None:
     graph = FakeGraph(pointer)
     with pytest.raises(WhatsAppError, match="no download url"):
         graph.client.download("media-1")
+
+
+@pytest.mark.parametrize("link", ["http://lookaside.test/photo", "", "https:/x"])
+def test_a_pointer_that_does_not_name_an_https_url_is_not_fetched(link: str) -> None:
+    def pointer(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"url": link})
+
+    graph = FakeGraph(pointer)
+    with pytest.raises(WhatsAppError, match="no download url"):
+        graph.client.download("media-1")
+
+    assert len(graph.requests) == 1
 
 
 # --- media ids to validated photo bytes ----------------------------------------------

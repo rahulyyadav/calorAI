@@ -13,7 +13,7 @@ import json
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -26,6 +26,10 @@ logger = logging.getLogger(__name__)
 
 SIGNATURE_PREFIX = "sha256="
 CHANNEL = "whatsapp"
+SYNTHETIC_EVENT_PREFIX = "wamid-sha:"
+# One day of slack for clock skew, and no more: a stamp further ahead is not a send time, and a
+# meal dated into another century quietly leaves every totals question and recent-meal window.
+MAX_SENT_AHEAD_SECONDS = 86_400
 
 # The message types this agent can act on: words about a plate, or a photo of one.
 _SUPPORTED_TYPES = ("text", "image")
@@ -132,7 +136,10 @@ def normalize_webhook(
                 continue
             items = _list(value.get("messages"))
             if not items:
-                _refuse(refused, block_sender)
+                # A block that names a conversation but carries no message (a shared contact card,
+                # say) still tells us who is on the other end. Only an unlisted one is refused.
+                if block_sender not in allowed_users:
+                    _refuse(refused, block_sender)
                 continue
             for item in items:
                 if item.get("status"):
@@ -188,7 +195,16 @@ def _event_id(item: Mapping[str, Any]) -> str:
     if isinstance(stated, str) and stated:
         return stated
     digest = hashlib.sha256(json.dumps(item, sort_keys=True).encode()).hexdigest()[:16]
-    return f"wamid-sha:{digest}"
+    return f"{SYNTHETIC_EVENT_PREFIX}{digest}"
+
+
+def is_fingerprinted_event(external_id: str) -> bool:
+    """True for the id this adapter invented when Meta sent none.
+
+    Such a message has no WhatsApp message id at all, so there is nothing to mark as read: the
+    receipt would be sent against an id Meta never issued.
+    """
+    return external_id.startswith(SYNTHETIC_EVENT_PREFIX)
 
 
 def _sent_at(item: Mapping[str, Any]) -> datetime | None:
@@ -204,9 +220,14 @@ def _sent_at(item: Mapping[str, Any]) -> datetime | None:
         # No message was ever sent before the epoch, and a stamp of zero would date a meal to 1970.
         return None
     try:
-        return datetime.fromtimestamp(seconds, UTC)
+        sent = datetime.fromtimestamp(seconds, UTC)
     except (OSError, OverflowError, ValueError):
         return None
+    if sent > datetime.now(UTC) + timedelta(seconds=MAX_SENT_AHEAD_SECONDS):
+        # A meal dated centuries ahead vanishes from every totals question and every recent-meal
+        # window, which is worse than the clock we fall back to when the stamp is missing.
+        return None
+    return sent
 
 
 def _as_inbound(item: Mapping[str, Any], *, sender: str, timezone: str) -> InboundMessage | None:
@@ -293,28 +314,20 @@ class GraphClient:
             },
         )
 
-    def mark_seen(self, message_id: str) -> None:
-        self.request(
-            "POST",
-            url=f"{self.base_url}/{self.phone_number_id}/messages",
-            json_body={
-                "messaging_product": "whatsapp",
-                "status": "read",
-                "message_id": message_id,
-            },
-        )
+    def mark_seen(self, message_id: str, *, typing: bool = False) -> None:
+        """The read receipt, optionally carrying the typing indicator that rides on it.
 
-    def typing_on(self, message_id: str) -> None:
-        self.request(
-            "POST",
-            url=f"{self.base_url}/{self.phone_number_id}/messages",
-            json_body={
-                "messaging_product": "whatsapp",
-                "status": "typing",
-                "message_id": message_id,
-                "typing": {"typing": True},
-            },
-        )
+        Meta has no standalone typing request: the indicator is one field of a read status, so a
+        single call shows the user both that their message was seen and that an answer is coming.
+        """
+        body: dict[str, Any] = {
+            "messaging_product": "whatsapp",
+            "status": "read",
+            "message_id": message_id,
+        }
+        if typing:
+            body["typing_indicator"] = {"type": "text"}
+        self.request("POST", url=f"{self.base_url}/{self.phone_number_id}/messages", json_body=body)
 
     def download(self, media_id: str) -> bytes:
         """Fetch a photo by its media id: the pointer first, then the bytes it points at."""
@@ -323,7 +336,9 @@ class GraphClient:
             link = pointer.json()["url"]
         except (ValueError, KeyError, TypeError) as error:
             raise WhatsAppError(f"media {media_id} came back with no download url") from error
-        if not isinstance(link, str) or not link:
+        # The bearer token goes on this second request, so the pointer must name an https host and
+        # not something else a configured base url could steer it to.
+        if not isinstance(link, str) or not link.startswith("https://"):
             raise WhatsAppError(f"media {media_id} came back with no download url")
         return self.request("GET", url=link).content
 

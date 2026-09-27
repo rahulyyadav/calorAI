@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import logging
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -25,6 +26,7 @@ from calorai_agent.whatsapp import (
     GraphClient,
     WebhookBatch,
     WhatsAppError,
+    is_fingerprinted_event,
     normalize_webhook,
     parse_webhook_body,
     signature_matches,
@@ -41,12 +43,37 @@ INTERNAL_FAILURE_REPLY = (
 
 Body = tuple[int, str]
 
+# Meta's own payloads are a few kilobytes. A declared body this much bigger is not a delivery, and
+# reading it into RAM before verifying it is the cheapest denial of service available on an open
+# HTTPS endpoint.
+MAX_WEBHOOK_BODY_BYTES = 1_000_000
+
 
 class InlineExecutor:
     """Runs submitted work immediately. Tests use it so a webhook can be asserted in one call."""
 
     def submit(self, work: Callable[[], None]) -> None:
         work()
+
+    def shutdown(self) -> None:
+        return None
+
+
+class WorkerExecutor:
+    """Answers on a worker thread, so the acknowledgement is written before the meal is worked on.
+
+    Meta retries anything slower than its timeout, and a retry of a turn this process is still
+    running would otherwise be a second connection thread doing the same work.
+    """
+
+    def __init__(self, max_workers: int = 4) -> None:
+        self.pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="calorai-reply")
+
+    def submit(self, work: Callable[[], None]) -> None:
+        self.pool.submit(work)
+
+    def shutdown(self) -> None:
+        self.pool.shutdown(wait=True)
 
 
 class WebhookApplication:
@@ -71,7 +98,9 @@ class WebhookApplication:
         self.repository = repository
         self.timezone = timezone
         self.allowed_users = allowed_users
-        self.executor = executor if executor is not None else InlineExecutor()
+        # The default is the production one on purpose: an inline default would silently turn a
+        # slow model into a retry storm, and only a test should opt out of the worker.
+        self.executor = executor if executor is not None else WorkerExecutor()
 
     def get(self, query: Mapping[str, list[str]]) -> Body:
         """Meta's subscription handshake: one exact challenge echo, or a refusal."""
@@ -106,22 +135,58 @@ class WebhookApplication:
         return 200, "ok"
 
     def answer(self, batch: WebhookBatch) -> None:
-        """Do the work behind the acknowledgement: every meal, then every honest decline."""
+        """Do the work behind the acknowledgement: every meal, then every honest decline.
+
+        Each item is answered on its own terms. The request thread has already promised Meta a 200,
+        so a locked database or a lost reply is that one message's failure, not the delivery's.
+        """
         for message in batch.messages:
-            self._answer_message(message)
+            try:
+                self._answer_message(message)
+            except Exception:  # noqa: BLE001 - one message must not end the others
+                logger.exception("could not answer message %s", message.external_id)
         for user_id, external_id, reply in batch.declines:
-            self._answer_decline(user_id, external_id, reply)
+            try:
+                self._answer_decline(user_id, external_id, reply)
+            except Exception:  # noqa: BLE001
+                logger.exception("could not decline message %s", external_id)
+
+    def shutdown(self) -> None:
+        """Let answers already in flight finish before the process leaves."""
+        stop = getattr(self.executor, "shutdown", None)
+        if callable(stop):
+            stop()
 
     def _answer_message(self, message: InboundMessage) -> None:
-        self.repository.ensure_user(message.user_id, self.timezone)
         self._seen(message)
         try:
+            self.repository.ensure_user(message.user_id, self.timezone)
             reply = self.agent.handle(message)
-        except Exception:  # noqa: BLE001 - one user's failure must not stop the worker
+        except Exception:  # noqa: BLE001 - the user deserves to know it did not land
             logger.exception("agent failed for message %s", message.external_id)
-            self._send(message.user_id, INTERNAL_FAILURE_REPLY)
-            return
+            reply = INTERNAL_FAILURE_REPLY
+            self._close_failed_turn(message, reply)
         self._send(message.user_id, reply)
+
+    def _close_failed_turn(self, message: InboundMessage, reply: str) -> None:
+        """Finish the ledger row a failed turn left open.
+
+        An event that stays incomplete makes every later retry answer "still working on it", which
+        is a promise this process has already stopped keeping. Closing it with the honest failure
+        reply means a retry says the same true thing.
+        """
+        try:
+            event = self.agent.tools.record_inbound(
+                RecordInboundInput(
+                    user_id=message.user_id,
+                    external_id=message.external_id,
+                    text=message.text,
+                    channel=message.channel,
+                )
+            )
+            self.agent.tools.complete_inbound(event.id, reply)
+        except Exception:  # noqa: BLE001 - already the failure path, with nowhere left to report
+            logger.exception("could not ledger the failure of message %s", message.external_id)
 
     def _answer_decline(self, user_id: str, external_id: str, reply: str) -> None:
         """Declines share the inbound ledger, so a redelivered voice note declines once.
@@ -139,10 +204,16 @@ class WebhookApplication:
         self.agent.tools.complete_inbound(event.id, reply)
 
     def _seen(self, message: InboundMessage) -> None:
-        """Best-effort read receipt and typing indicator; a failure here is not the user's."""
+        """The read receipt and typing indicator, best-effort: a failure here is not the user's.
+
+        Meta shows typing on the same read request, so one call says both that the message was seen
+        and that an answer is coming.
+        """
+        if is_fingerprinted_event(message.external_id):
+            # This adapter invented that id because Meta sent none, so there is no message to mark.
+            return
         try:
-            self.client.mark_seen(message.external_id)
-            self.client.typing_on(message.external_id)
+            self.client.mark_seen(message.external_id, typing=True)
         except WhatsAppError as error:
             logger.warning("could not acknowledge message %s: %s", message.external_id, error)
 
@@ -174,9 +245,31 @@ def build_handler(application: WebhookApplication, path: str) -> type[BaseHTTPRe
             if urlparse(self.path).path != path:
                 self._respond((404, "not found"))
                 return
-            length = int(self.headers.get("Content-Length") or 0)
-            body = self.rfile.read(length) if length > 0 else b""
+            declared = self._declared_length()
+            if declared is None:
+                self._close_after((400, "invalid Content-Length"))
+                return
+            if declared > MAX_WEBHOOK_BODY_BYTES:
+                # Nothing here was signed, so nothing here is a delivery: an endpoint on a public
+                # tunnel must not let a stranger choose how much of our memory gets read in.
+                logger.warning("refused webhook body of %d bytes", declared)
+                self._close_after((413, "body too large"))
+                return
+            body = self.rfile.read(declared) if declared else b""
             self._respond(application.post(self.headers.get("X-Hub-Signature-256"), body))
+
+        def _declared_length(self) -> int | None:
+            """The body size this connection claims, or None when the claim is not a size."""
+            try:
+                length = int(self.headers.get("Content-Length") or "0")
+            except ValueError:
+                return None
+            return length if length >= 0 else None
+
+        def _close_after(self, result: Body) -> None:
+            # The body is deliberately left unread, so this connection cannot be reused.
+            self.close_connection = True
+            self._respond(result)
 
         def _respond(self, result: Body) -> None:
             status, text = result
@@ -188,8 +281,12 @@ def build_handler(application: WebhookApplication, path: str) -> type[BaseHTTPRe
             self.wfile.write(payload)
 
         def log_message(self, message: str, *args: Any) -> None:
-            # Access lines go through the app logger, which never sees bodies or tokens.
-            logger.debug("webhook %s - %s", self.address_string(), message % args)
+            # Access lines go through the app logger, which never sees bodies or tokens — and the
+            # handshake carries its verify token in the query string, so a logged request line is
+            # cut at the first "?". The path alone says what the request was for.
+            logger.debug(
+                "webhook %s - %s", self.address_string(), (message % args).split("?", 1)[0]
+            )
 
     return WhatsAppHandler
 
@@ -255,6 +352,9 @@ def main() -> int:
         print("shutting down")
     finally:
         server.server_close()
+        # A message already being answered is finished before the process leaves, so the user is
+        # never left with a read receipt and no reply.
+        application.shutdown()
     return 0
 
 

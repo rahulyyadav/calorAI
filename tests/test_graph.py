@@ -150,7 +150,7 @@ def test_vague_grazing_asks_instead_of_logging(agent: MealAgent, clock) -> None:
 def test_hedged_portion_is_logged_as_a_disclosed_estimate(agent: MealAgent, clock) -> None:
     response = _send(agent, clock, "leftover biryani, maybe two thirds of the box", 20)
 
-    assert response.startswith("Logged about 0.7 serving of biryani — roughly 400 kcal")
+    assert response.startswith("Logged about 0.67 serving of biryani — roughly 400 kcal")
     assert "estimate" in response
 
 

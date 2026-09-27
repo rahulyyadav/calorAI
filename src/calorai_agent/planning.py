@@ -19,6 +19,7 @@ from calorai_agent.domain import (
     MealRecord,
     MealReference,
     MealType,
+    MediaRef,
     MemoryRecord,
     NamedRoutine,
     NutritionTarget,
@@ -325,6 +326,7 @@ class PlannerRequest:
     timezone: str = "UTC"
     recent_meals: Sequence[MealRecord] = ()
     memories: Sequence[MemoryRecord] = ()
+    media: MediaRef | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -355,19 +357,40 @@ class MessagePlanner(Protocol):
     def parse(self, request: PlannerRequest) -> ParsedMessage: ...
 
 
+# Every word the reference table can price, longest first so "milk chai" beats "milk".
+_FOOD_PATTERN = re.compile(
+    r"\b("
+    + "|".join(sorted((re.escape(n) for n in (*FOODS, *ALIASES)), key=len, reverse=True))
+    + r")\b",
+    re.IGNORECASE,
+)
+
+
+def mentions_in(text: str) -> dict[str, _Mention]:
+    """Every food mention in a message, aggregated by canonical food."""
+    mentioned: dict[str, _Mention] = {}
+    for match in _FOOD_PATTERN.finditer(text):
+        key = ALIASES.get(match.group(1), match.group(1))
+        mentioned[key] = _merged(mentioned.get(key), _quantity_around(text, match))
+    return mentioned
+
+
+def meal_type_hint(text: str) -> MealType | None:
+    """The meal a message places itself at, whatever casing it arrived in."""
+    return _type_hint(" ".join(text.lower().strip().split()))
+
+
+def day_offset_hint(text: str) -> int:
+    """How many days back a message points: 0 today, -1 yesterday."""
+    return _day_offset(" ".join(text.lower().strip().split()))
+
+
 class RuleBasedPlanner:
     """Deterministic interpreter for the supported food vocabulary.
 
     Deliberately replaceable: a model planner implements the same `MessagePlanner`
     protocol and returns the same typed `ParsedMessage`.
     """
-
-    _food_pattern = re.compile(
-        r"\b("
-        + "|".join(sorted((re.escape(n) for n in (*FOODS, *ALIASES)), key=len, reverse=True))
-        + r")\b",
-        re.IGNORECASE,
-    )
 
     def parse(self, request: PlannerRequest) -> ParsedMessage:
         text = _normalize_amounts(" ".join(request.text.lower().strip().split()))
@@ -393,7 +416,7 @@ class RuleBasedPlanner:
                 reference=_reference(text, self._first_food(text)),
             )
 
-        mentions = self._mentions(text)
+        mentions = mentions_in(text)
         stated = {key: mention for key, mention in mentions.items() if not mention.denied}
         if mentions and not stated:
             # Every food in the message was refused ("no eggs"): nothing to log.
@@ -426,7 +449,7 @@ class RuleBasedPlanner:
 
     @staticmethod
     def _is_totals_question(text: str) -> bool:
-        return _contains(text, TOTALS_PHRASES) and not RuleBasedPlanner._food_pattern.search(text)
+        return _contains(text, TOTALS_PHRASES) and _FOOD_PATTERN.search(text) is None
 
     @staticmethod
     def _is_list_question(text: str) -> bool:
@@ -466,7 +489,7 @@ class RuleBasedPlanner:
         """The foods a message names, phrased the way the user phrased them."""
         return tuple(
             f"{mention.quantity:g} {name}"
-            for name, mention in self._mentions(text).items()
+            for name, mention in mentions_in(text).items()
             if not mention.denied
         )
 
@@ -507,14 +530,6 @@ class RuleBasedPlanner:
             ),
         )
 
-    def _mentions(self, text: str) -> dict[str, _Mention]:
-        """Every food mention in the message, aggregated by canonical food."""
-        mentioned: dict[str, _Mention] = {}
-        for match in self._food_pattern.finditer(text):
-            key = ALIASES.get(match.group(1), match.group(1))
-            mentioned[key] = _merged(mentioned.get(key), _quantity_around(text, match))
-        return mentioned
-
     def _draft(self, request: PlannerRequest, text: str, items: list[MealItemDraft]) -> MealDraft:
         meal_type = _meal_type(text)
         return MealDraft(
@@ -527,7 +542,7 @@ class RuleBasedPlanner:
 
     @staticmethod
     def _first_food(text: str) -> str | None:
-        match = RuleBasedPlanner._food_pattern.search(text)
+        match = _FOOD_PATTERN.search(text)
         if match is None:
             return None
         return FOODS[ALIASES.get(match.group(1), match.group(1))].canonical_name

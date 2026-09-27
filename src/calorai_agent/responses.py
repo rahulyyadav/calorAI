@@ -19,9 +19,11 @@ from calorai_agent.policy import LogDecision
 
 
 def quantity(value: Decimal) -> str:
+    """A portion rounded no further than two decimals: 0.75 of a shared plate must not
+    come back as 0.8, or the reply states a portion the user never ate."""
     if value == value.to_integral():
         return str(int(value))
-    return str(value.quantize(Decimal("0.1")).normalize())
+    return str(value.quantize(Decimal("0.01")).normalize())
 
 
 def item_line(item: MealItemDraft) -> str:
@@ -164,6 +166,25 @@ def no_reference_match(candidates: Sequence[MealRecord], *, timezone_name: str) 
         return "I couldn't find a recent meal that matches."
     described = " or ".join(_meal_label(meal, timezone_name) for meal in candidates[:3])
     return f"Which of your recent meals do you mean — {described}?"
+
+
+def vision_unavailable() -> str:
+    """A photo needs a vision model. Without one the turn is refused, never guessed around."""
+    return (
+        "I cannot read a photo until a vision model is configured — set CALORAI_VISION_MODEL "
+        "and its API key. Describe the plate instead and I will log it."
+    )
+
+
+def media_rejected(reason: str) -> str:
+    return f"I could not use that attachment: {reason} Describe the meal and I will log it."
+
+
+def photo_unreadable() -> str:
+    return (
+        "I could not get a reliable read of that photo. Tell me what was on the plate and "
+        "roughly how much, and I will log that instead."
+    )
 
 
 def _meal_label(meal: MealRecord, timezone_name: str) -> str:

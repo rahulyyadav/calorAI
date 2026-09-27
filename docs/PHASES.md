@@ -95,7 +95,7 @@ routine is never guessed — an unlabeled save asks which meal to remember, `my 
 a breakfast saved says which slot is missing, and several saved routines with no meal type asks
 instead of inventing a number.
 
-## Phase 4 - Separate vision path and multimodal fusion
+## Phase 4 - Separate vision path and multimodal fusion (complete)
 
 **Outcome:** a plate photo can be logged safely with an optional caption.
 
@@ -106,6 +106,31 @@ instead of inventing a number.
 - Store model confidence/provenance; never create a second meal for the caption.
 
 **Evidence:** image-only and image-plus-caption evals; one inbound event maps to one meal; uncertain image asks one focused question.
+
+Implemented evidence: 197 tests pass at 95% package coverage with ruff and strict mypy clean, and
+`python scripts/run_photo_evals.py` runs 10 image-only and image-plus-caption scenarios through the
+real graph with a scripted vision answer — no API key, no network. A photo owns a graph node
+(`read_media`) and its own client: bytes are judged by their jpeg/png/webp signature, capped at
+8 MB, and only ever reach the vision model, never the text planner. The model returns one strict
+JSON object of `{name, quantity, confidence, alternative}` per food with `extra="forbid"`, so an
+answer that carries its own calorie estimate is refused outright instead of logged. Every line is
+then priced from the reference table — the 960 kcal on a photographed biryani is the table's number
+— while the observation's confidence and the reading model are stored with the meal as
+`origin = vision_fusion`. Fusion applies the caption as *modifiers* on the photographed plate, with
+recent meals and memory withheld from it: a stated portion outranks the model's guess line by line,
+`half of this` scales every line while `half a dosa` stays one food's portion, and `my usual` cannot
+also replay a saved routine. One inbound event therefore maps to exactly one meal, verified by a
+redelivered photo that logs one meal and shows the model one photo, and by two photos sent in the
+same second becoming two meals. Uncertainty is decided by arithmetic rather than prose: a read
+between 0.55 and 0.8 confidence logs a disclosed estimate, a weaker one asks exactly one question —
+an either/or when its second guess sits 150 kcal or 12 g protein away, the plain naming question
+otherwise — and a caption that already named the food ends the question before it is asked. Every
+failure boundary answers honestly instead of guessing: no vision key configured, a file that is not
+a photo, an oversized attachment, a provider error, an empty plate, and a food the table cannot
+price (which is named, never invented). Two known boundaries: only a local CLI path is readable
+until Phase 5 supplies a WhatsApp media source, and a redelivered photo turn replays its logged
+numbers without the photo's reply notes, because those notes are conversation text and not
+persisted state.
 
 ## Phase 5 - WhatsApp Cloud API integration
 

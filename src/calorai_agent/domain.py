@@ -95,6 +95,35 @@ class InterpretationOrigin(StrEnum):
     USER_CONFIRMED = "user_confirmed"
 
 
+class MediaRef(BaseModel):
+    """Where a photo came from, phrased so no adapter detail reaches the graph.
+
+    A CLI hands over a path; WhatsApp hands over a media id that Phase 5 downloads. Either
+    way the graph only ever sees this reference and an external id that deduplicates it.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    external_id: str = Field(min_length=1, max_length=200)
+    locator: str = Field(min_length=1, max_length=2000)
+    source: Literal["local_path", "whatsapp_media"] = "local_path"
+
+
+class FoodObservation(BaseModel):
+    """One line of a vision model's read of a plate, with the model's own doubt attached.
+
+    Deliberately carries no nutrition: the application prices every line from the reference
+    table, so a model cannot invent a calorie number.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str = Field(min_length=1, max_length=200)
+    quantity: Decimal = Field(default=Decimal("1"), gt=0)
+    confidence: float = Field(default=1.0, ge=0, le=1)
+    alternative: str | None = Field(default=None, max_length=200)
+
+
 class MealDraft(BaseModel):
     meal_type: MealType = MealType.UNSPECIFIED
     occurred_at: datetime
@@ -245,11 +274,16 @@ class ParsedMessage(BaseModel):
     unrecognized: tuple[str, ...] = ()
     memory: MemoryContent | None = None
     unlogged: tuple[str, ...] = ()
+    reply_notes: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def validate_payload(self) -> ParsedMessage:
         if self.intent is AgentIntent.LOG_MEAL and self.draft is None:
             raise ValueError("log_meal requires a meal draft")
+        if self.intent is AgentIntent.LOG_MEAL and isinstance(self.memory, NamedRoutine):
+            # A routine remembers a meal that already exists. On the turn that creates the
+            # meal there is nothing to point at yet, so it stays its own message.
+            raise ValueError("a routine can only be remembered as its own turn")
         if self.intent is AgentIntent.REPEAT_MEAL and self.reference is None:
             raise ValueError("repeat_meal requires a meal reference")
         if self.intent in (AgentIntent.REVISE_MEAL, AgentIntent.DELETE_MEAL):
@@ -275,6 +309,7 @@ class InboundMessage:
     channel: str = "cli"
     timezone: str = "UTC"
     received_at: datetime | None = None
+    media: MediaRef | None = None
 
 
 @dataclass(frozen=True, slots=True)

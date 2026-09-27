@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta
 from typing import NotRequired, TypedDict
@@ -16,6 +17,8 @@ from calorai_agent.domain import (
     MealItemDraft,
     MealRecord,
     MealType,
+    MediaRef,
+    MemoryContent,
     MemoryKind,
     MemoryRecord,
     MutationKind,
@@ -23,6 +26,7 @@ from calorai_agent.domain import (
     ParsedMessage,
     combine_portions,
 )
+from calorai_agent.fusion import fuse
 from calorai_agent.memory import (
     DEFAULT_ROUTINE_SLOT,
     conflicting_foods,
@@ -43,6 +47,9 @@ from calorai_agent.tools import (
     RememberInput,
     ReviseMealInput,
 )
+from calorai_agent.vision import MediaError, VisionError, VisionInterpreter, VisionReading
+
+logger = logging.getLogger(__name__)
 
 REFERENCE_LOOKBACK_DAYS = 3
 
@@ -78,6 +85,8 @@ class AgentState(TypedDict):
     message: str
     now: datetime
     event_id: NotRequired[str | None]
+    media: NotRequired[MediaRef | None]
+    reading: NotRequired[VisionReading | None]
     today: NotRequired[date]
     recent_meals: NotRequired[list[MealRecord]]
     memories: NotRequired[list[MemoryRecord]]
@@ -88,7 +97,7 @@ class AgentState(TypedDict):
 
 
 class MealAgent:
-    """context -> plan -> resolve -> one bounded tool, or one conversational reply."""
+    """context -> media -> plan -> resolve -> one bounded tool, or one conversational reply."""
 
     def __init__(
         self,
@@ -96,14 +105,18 @@ class MealAgent:
         tools: MealTools,
         policy: AmbiguityPolicy | None = None,
         resolver: MealReferenceResolver | None = None,
+        *,
+        vision: VisionInterpreter | None = None,
     ) -> None:
         self.planner = planner
         self.tools = tools
         self.policy = policy or AmbiguityPolicy()
         self.resolver = resolver or MealReferenceResolver(self.policy)
+        self.vision = vision
 
         builder = StateGraph(AgentState)
         builder.add_node("gather_context", self._gather_context)
+        builder.add_node("read_media", self._read_media)
         builder.add_node("plan", self._plan)
         builder.add_node("resolve_reference", self._resolve_reference)
         builder.add_node("log_meal", self._log_meal)
@@ -116,7 +129,13 @@ class MealAgent:
         builder.add_node("respond", self._respond)
 
         builder.add_edge(START, "gather_context")
-        builder.add_edge("gather_context", "plan")
+        builder.add_edge("gather_context", "read_media")
+        # A photo the application cannot use ends the turn here: no plan, no tool, no meal.
+        builder.add_conditional_edges(
+            "read_media",
+            lambda state: "blocked" if state.get("response") is not None else "plan",
+            {"blocked": END, "plan": "plan"},
+        )
         builder.add_edge("plan", "resolve_reference")
         builder.add_conditional_edges(
             "resolve_reference",
@@ -153,6 +172,7 @@ class MealAgent:
         *,
         timezone: str = "UTC",
         now: datetime | None = None,
+        media: MediaRef | None = None,
     ) -> str:
         zone = ZoneInfo(timezone)
         current = now or datetime.now(zone)
@@ -162,10 +182,11 @@ class MealAgent:
             InboundMessage(
                 user_id=user_id,
                 text=message,
-                external_id=cli_event_id(user_id, message, current),
+                external_id=cli_event_id(user_id, message, current, media),
                 channel="cli",
                 timezone=timezone,
                 received_at=current,
+                media=media,
             )
         )
 
@@ -214,6 +235,7 @@ class MealAgent:
                 "message": inbound.text,
                 "now": now,
                 "event_id": event_id,
+                "media": inbound.media,
             }
         )
         response = result.get("response")
@@ -236,17 +258,38 @@ class MealAgent:
         )
         return {"today": today, "recent_meals": meals, "memories": memories}
 
-    def _plan(self, state: AgentState) -> dict[str, ParsedMessage]:
-        parsed = self.planner.parse(
-            PlannerRequest(
-                text=state["message"],
-                occurred_at=state["now"],
-                timezone=state["timezone"],
-                recent_meals=tuple(state["recent_meals"]),
-                memories=tuple(state["memories"]),
-            )
+    def _read_media(self, state: AgentState) -> dict[str, object]:
+        """Turn a photo attachment into structured observations, or into an honest reply."""
+        media = state.get("media")
+        if media is None:
+            return {}
+        if self.vision is None:
+            return {"response": responses.vision_unavailable()}
+        try:
+            return {"reading": self.vision.read(media, state["message"])}
+        except MediaError as error:
+            return {"response": responses.media_rejected(str(error))}
+        except VisionError:
+            logger.warning("vision read failed for media %s", media.external_id)
+            return {"response": responses.photo_unreadable()}
+
+    def _request(self, state: AgentState) -> PlannerRequest:
+        return PlannerRequest(
+            text=state["message"],
+            occurred_at=state["now"],
+            timezone=state["timezone"],
+            recent_meals=tuple(state["recent_meals"]),
+            memories=tuple(state["memories"]),
+            media=state.get("media"),
         )
-        return {"parsed": parsed}
+
+    def _plan(self, state: AgentState) -> dict[str, ParsedMessage]:
+        reading = state.get("reading")
+        if reading is not None:
+            # A photo owns the turn. The caption is fused into the photographed meal rather than
+            # planned as a message of its own, so one inbound event can never log two meals.
+            return {"parsed": fuse(self._request(state), reading, self.policy)}
+        return {"parsed": self.planner.parse(self._request(state))}
 
     def _resolve_reference(self, state: AgentState) -> dict[str, Resolution | bool]:
         parsed = state["parsed"]
@@ -297,11 +340,29 @@ class MealAgent:
         meal = self.tools.log_meal(
             LogMealInput(user_id=state["user_id"], meal=draft, source_event_id=state["event_id"])
         )
-        return {
-            "response": responses.logged(
-                meal, decision, _meal_notes(parsed.unrecognized, state["memories"], meal.items)
+        reply = responses.logged(
+            meal,
+            decision,
+            _meal_notes(
+                parsed.unrecognized,
+                state["memories"],
+                meal.items,
+                parsed.reply_notes,
+                stated=parsed.memory,
+            ),
+        )
+        if parsed.memory is not None:
+            # A photo caption may state a durable fact beside the plate. The meal is the primary
+            # action so it lands first; the fact then rides on the same inbound event.
+            saved = self.tools.remember(
+                RememberInput(
+                    user_id=state["user_id"],
+                    memory=parsed.memory,
+                    source_event_id=state.get("event_id"),
+                )
             )
-        }
+            reply = f"{responses.remembered(saved.content)} {reply}"
+        return {"response": reply}
 
     def _repeat_meal(self, state: AgentState) -> dict[str, str]:
         source = self._resolved_meal(state)
@@ -334,7 +395,9 @@ class MealAgent:
                 source,
                 logged,
                 label,
-                _meal_notes(parsed.unrecognized, state["memories"], logged.items),
+                _meal_notes(
+                    parsed.unrecognized, state["memories"], logged.items, stated=parsed.memory
+                ),
                 timezone_name=state["timezone"],
             )
         }
@@ -357,7 +420,9 @@ class MealAgent:
         )
         if revised is None:
             return {"response": responses.not_found("that")}
-        notes = _meal_notes(parsed.unrecognized, state["memories"], revised.items)
+        notes = _meal_notes(
+            parsed.unrecognized, state["memories"], revised.items, stated=parsed.memory
+        )
         return {"response": responses.revised(revised, notes, timezone_name=state["timezone"])}
 
     def _save_memory(self, state: AgentState) -> dict[str, str]:
@@ -471,10 +536,16 @@ def _at_local_time(
     return datetime.combine(day, clock, tzinfo=zone)
 
 
-def cli_event_id(user_id: str, message: str, at: datetime) -> str:
-    """Stable per-message key so an identical CLI resend cannot log a second meal."""
+def cli_event_id(user_id: str, message: str, at: datetime, media: MediaRef | None = None) -> str:
+    """Stable per-message key so an identical CLI resend cannot log a second meal.
+
+    The photo's own id is part of the key: two different plates sent with the same words in the
+    same second are two messages, and one plate sent twice is one.
+    """
     stamp = at.isoformat(timespec="seconds")
-    digest = hashlib.sha256(f"{user_id}|{message}|{stamp}".encode()).hexdigest()
+    digest = hashlib.sha256(
+        f"{user_id}|{message}|{media.external_id if media else ''}|{stamp}".encode()
+    ).hexdigest()
     return f"cli:{digest[:24]}"
 
 
@@ -488,12 +559,16 @@ def _clarify(items: Sequence[MealItemDraft], policy: AmbiguityPolicy) -> str:
 
 
 def _meal_notes(
-    unrecognized: Sequence[str], memories: Sequence[MemoryRecord], items: Sequence[MealItemDraft]
+    unrecognized: Sequence[str],
+    memories: Sequence[MemoryRecord],
+    items: Sequence[MealItemDraft],
+    extra: Sequence[str] = (),
+    stated: MemoryContent | None = None,
 ) -> list[str]:
     """What a written meal should be answered with beyond its own numbers."""
-    notes = [responses.omission(unrecognized)]
-    conflicts = conflicting_foods(memories, items)
-    diet = current_diet(memories)
+    notes = [responses.omission(unrecognized), *extra]
+    conflicts = conflicting_foods(memories, items, stated_in_message=stated)
+    diet = current_diet(memories, stated_in_message=stated)
     if conflicts and diet is not None:
         notes.append(responses.diet_conflict(diet, conflicts))
     return [note for note in notes if note]

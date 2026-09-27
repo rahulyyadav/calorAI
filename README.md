@@ -9,7 +9,7 @@ This repository deliberately separates the **agent core** from its delivery chan
 
 ## Current status
 
-Phases 0 to 3 are complete. The repository contains a locally runnable LangGraph vertical slice with SQLite persistence, deterministic nutrition reference data, typed meal tools, timezone-correct daily totals, and a CLI. Corrections are written as immutable meal revisions inside one transaction, ambiguous requests ask one focused question instead of guessing, refusals and impossible portions never reach a persisted row, and retried inbound messages are answered from an exactly-once event ledger. A text-model planner implements the same interface as the deterministic one and falls back to it on any unusable output, so the slice still runs without API keys. Memory survives a restart as typed records with confidence and provenance: a stated diet shapes later log replies, a protein or calorie target turns totals into progress, and `my usual` replays a saved routine as a new meal. A changed fact supersedes the one it replaces instead of contradicting it, and retrieval is bounded per kind — one diet, one target per nutrient, a few routines — so no saved habit can evict the facts every reply depends on. Vision and WhatsApp arrive in subsequent phases and are not claimed as implemented yet.
+Phases 0 to 4 are complete. The repository contains a locally runnable LangGraph vertical slice with SQLite persistence, deterministic nutrition reference data, typed meal tools, timezone-correct daily totals, and a CLI. Corrections are written as immutable meal revisions inside one transaction, ambiguous requests ask one focused question instead of guessing, refusals and impossible portions never reach a persisted row, and retried inbound messages are answered from an exactly-once event ledger. A text-model planner implements the same interface as the deterministic one and falls back to it on any unusable output, so the slice still runs without API keys. Memory survives a restart as typed records with confidence and provenance: a stated diet shapes later log replies, a protein or calorie target turns totals into progress, and `my usual` replays a saved routine as a new meal. A changed fact supersedes the one it replaces instead of contradicting it, and retrieval is bounded per kind — one diet, one target per nutrient, a few routines — so no saved habit can evict the facts every reply depends on. A photo takes its own path: bytes are checked against their signature before anything is billed, a dedicated vision model reports only the foods and portions it can separate, and the application prices every line from the reference table, so no model's calorie guess reaches the database. The caption beside a photo modifies that plate instead of becoming a second meal — `half of this` halves it, `2 cups of rice` outranks the model's portion, `my usual` cannot also replay a saved routine — and a read too shaky to price asks one focused question while a shaky-but-close one logs a disclosed estimate. Confidence and the model that read the photo are stored with the meal. WhatsApp arrives in the next phase and is not claimed as implemented yet.
 
 Start with:
 
@@ -68,6 +68,33 @@ my usual
 
 Each `calorai` invocation is a fresh process, so `my usual` and the stated target keep working after
 you close and reopen the CLI.
+
+### With a photo
+
+Set `CALORAI_VISION_MODEL` and its API key in `.env`, then attach a plate:
+
+```bash
+calorai --image ~/Downloads/plate.jpg "this is lunch, and half of it is my brother's"
+```
+
+The photo goes to the vision model and never to the text model. The model names the foods it can
+separate and their visible portions; the application prices each line from the reference table, so
+no model's calorie guess reaches the database. Words beside the photo change that one meal — they
+add a food, restate a portion, or share the plate — and never log a second one.
+
+Without a vision key the CLI says so instead of inventing a plate:
+
+```text
+I cannot read a photo until a vision model is configured — set CALORAI_VISION_MODEL and its API
+key. Describe the plate instead and I will log it.
+```
+
+The same path runs with a scripted vision answer, so a reviewer can see every photo case with no
+key and no network:
+
+```bash
+python scripts/run_photo_evals.py
+```
 
 Run the verification suite:
 

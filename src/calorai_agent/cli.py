@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 from dataclasses import replace
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import uuid4
 
 from calorai_agent.app import create_agent
 from calorai_agent.config import Settings
-from calorai_agent.domain import InboundMessage
+from calorai_agent.domain import InboundMessage, MediaRef
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -15,6 +17,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("message", nargs="*", help="Send one message and exit")
     parser.add_argument("--user", help="Override CALORAI_USER_ID")
     parser.add_argument("--timezone", help="Override CALORAI_TIMEZONE")
+    parser.add_argument(
+        "--image",
+        metavar="PATH",
+        help="Attach a jpeg, png, or webp photo of the plate (needs a vision model)",
+    )
     parser.add_argument(
         "--planner",
         choices=("auto", "deterministic", "model"),
@@ -37,8 +44,9 @@ def main() -> None:
 
     agent = create_agent(settings)
 
-    if args.message:
-        print(agent.invoke(user_id, " ".join(args.message), timezone=timezone))
+    if args.message or args.image:
+        media = None if args.image is None else photo_reference(args.image)
+        print(agent.invoke(user_id, " ".join(args.message), timezone=timezone, media=media))
         return
 
     print("CalorAI — describe a meal, ask for totals, or type 'quit'.")
@@ -63,6 +71,13 @@ def main() -> None:
             )
         )
         print(f"calorai> {response}")
+
+
+def photo_reference(path: str) -> MediaRef:
+    """Identify a CLI photo by where it is, so the same file sent twice stays one message."""
+    resolved = str(Path(path).expanduser().resolve())
+    digest = hashlib.sha256(resolved.encode()).hexdigest()[:16]
+    return MediaRef(external_id=f"cli-photo:{digest}", locator=resolved)
 
 
 if __name__ == "__main__":

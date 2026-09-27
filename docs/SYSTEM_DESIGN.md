@@ -73,7 +73,10 @@ Retrieval is filtered first by typed intent and validity, then limited to a tiny
 - **High impact or conflicting evidence:** ask one focused question before committing.
 - **Vision uncertainty:** describe what is uncertain; never silently present a confident food identity.
 
-The decision threshold will be encoded and eval-tested, not left solely to prompt prose.
+The thresholds are encoded in `AmbiguityPolicy` and tested, not left to prompt prose: a read at 0.8
+confidence or better logs plainly, 0.55 to 0.8 logs a disclosed estimate, below 0.55 asks — and for
+a photographed food the ask is only an either/or when the model's second guess sits 150 kcal or
+12 g protein away, since two candidates with the same numbers are not worth a round trip.
 
 ## Latency strategy
 

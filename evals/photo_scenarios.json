@@ -1,0 +1,146 @@
+{
+  "comment": "Phase 4 photo evals. Each scenario feeds the agent a scripted vision answer, so it runs with no API key and no network. The vision model never supplies nutrition: the 'kcal' below is what the reference table prices the observed plate at.",
+  "scenarios": [
+    {
+      "name": "image only, a legible plate",
+      "caption": "",
+      "vision_answer": {
+        "items": [
+          {"name": "biryani", "quantity": "1.5", "confidence": 0.92, "alternative": null},
+          {"name": "curd", "quantity": "0.5", "confidence": 0.85, "alternative": null}
+        ],
+        "unclear": null
+      },
+      "sends": 1,
+      "expect": {
+        "meals": 1,
+        "asks": false,
+        "items": ["biryani", "curd"],
+        "kcal": "960",
+        "reply_contains": ["Logged 1.5 serving of biryani", "I read that off your photo"]
+      }
+    },
+    {
+      "name": "image plus caption adds a food the photo hides",
+      "caption": "and a banana with it",
+      "vision_answer": {
+        "items": [
+          {"name": "biryani", "quantity": "1.5", "confidence": 0.92, "alternative": null},
+          {"name": "curd", "quantity": "0.5", "confidence": 0.85, "alternative": null}
+        ],
+        "unclear": null
+      },
+      "sends": 1,
+      "expect": {
+        "meals": 1,
+        "asks": false,
+        "items": ["biryani", "curd", "banana"],
+        "reply_contains": ["banana"]
+      }
+    },
+    {
+      "name": "image plus caption shares the photographed plate",
+      "caption": "half of this, it's my brother's",
+      "vision_answer": {
+        "items": [
+          {"name": "biryani", "quantity": "1.5", "confidence": 0.92, "alternative": null},
+          {"name": "curd", "quantity": "0.5", "confidence": 0.85, "alternative": null}
+        ],
+        "unclear": null
+      },
+      "sends": 1,
+      "expect": {
+        "meals": 1,
+        "asks": false,
+        "items": ["biryani", "curd"],
+        "kcal": "480",
+        "reply_contains": ["I counted half of the plate, as you said."]
+      }
+    },
+    {
+      "name": "the caption's portion outranks the model's guess",
+      "caption": "2 cups of rice",
+      "vision_answer": {
+        "items": [{"name": "rice", "quantity": "3", "confidence": 0.9, "alternative": null}],
+        "unclear": null
+      },
+      "sends": 1,
+      "expect": {"meals": 1, "asks": false, "items": ["cooked rice"], "kcal": "410"}
+    },
+    {
+      "name": "a photo that could be two very different dishes asks one question",
+      "caption": "",
+      "vision_answer": {
+        "items": [{"name": "rice", "quantity": "1", "confidence": 0.3, "alternative": "chicken"}],
+        "unclear": null
+      },
+      "sends": 1,
+      "expect": {
+        "meals": 0,
+        "asks": true,
+        "reply_contains": ["Is that cooked rice or chicken?"]
+      }
+    },
+    {
+      "name": "a shaky read that cannot move the number logs a disclosed estimate",
+      "caption": "",
+      "vision_answer": {
+        "items": [{"name": "roti", "quantity": "2", "confidence": 0.7, "alternative": "paratha"}],
+        "unclear": null
+      },
+      "sends": 1,
+      "expect": {"meals": 1, "asks": false, "reply_contains": ["That is an estimate"]}
+    },
+    {
+      "name": "the caption answers the photo's question",
+      "caption": "that is 1 cup of rice",
+      "vision_answer": {
+        "items": [{"name": "rice", "quantity": "1", "confidence": 0.3, "alternative": "chicken"}],
+        "unclear": null
+      },
+      "sends": 1,
+      "expect": {"meals": 1, "asks": false, "items": ["cooked rice"], "kcal": "205"}
+    },
+    {
+      "name": "a food with no reference data is named, never invented",
+      "caption": "",
+      "vision_answer": {
+        "items": [{"name": "dragon fruit", "quantity": "1", "confidence": 0.9, "alternative": null}],
+        "unclear": null
+      },
+      "sends": 1,
+      "expect": {
+        "meals": 0,
+        "asks": true,
+        "reply_contains": ["no reference data for dragon fruit"]
+      }
+    },
+    {
+      "name": "a redelivered photo is one meal",
+      "caption": "lunch",
+      "vision_answer": {
+        "items": [
+          {"name": "biryani", "quantity": "1.5", "confidence": 0.92, "alternative": null},
+          {"name": "curd", "quantity": "0.5", "confidence": 0.85, "alternative": null}
+        ],
+        "unclear": null
+      },
+      "sends": 2,
+      "expect": {"meals": 1, "asks": false, "vision_calls": 1, "kcal": "960"}
+    },
+    {
+      "name": "a diet stated beside the plate is kept and still warns",
+      "caption": "i'm vegetarian btw",
+      "vision_answer": {
+        "items": [{"name": "chicken", "quantity": "1", "confidence": 0.9, "alternative": null}],
+        "unclear": null
+      },
+      "sends": 1,
+      "expect": {
+        "meals": 1,
+        "asks": false,
+        "reply_contains": ["I will remember you are vegetarian", "chicken is not vegetarian"]
+      }
+    }
+  ]
+}

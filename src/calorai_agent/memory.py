@@ -122,20 +122,39 @@ def avoided_foods(constraints: Sequence[DietaryConstraint]) -> frozenset[str]:
     return DIET_AVOIDS.get(constraints[0].diet, frozenset())
 
 
-def current_diet(memories: Sequence[MemoryRecord]) -> str | None:
+def current_diet(
+    memories: Sequence[MemoryRecord], *, stated_in_message: MemoryContent | None = None
+) -> str | None:
     """The diet the user last claimed for themselves, if they ever did."""
-    stated = diets(memories)
+    stated = diet_facts(memories, stated_in_message)
     return stated[0].diet if stated else None
 
 
 def conflicting_foods(
-    memories: Sequence[MemoryRecord], items: Sequence[MealItemDraft]
+    memories: Sequence[MemoryRecord],
+    items: Sequence[MealItemDraft],
+    *,
+    stated_in_message: MemoryContent | None = None,
 ) -> tuple[str, ...]:
     """Foods being logged that the user's own diet rules out."""
-    avoided = avoided_foods(diets(memories))
+    avoided = avoided_foods(diet_facts(memories, stated_in_message))
     if not avoided:
         return ()
     return tuple(item.name for item in items if item.name in avoided)
+
+
+def diet_facts(
+    memories: Sequence[MemoryRecord], stated_in_message: MemoryContent | None = None
+) -> tuple[DietaryConstraint, ...]:
+    """The diet facts a turn should judge against, newest first.
+
+    A diet stated in the message being handled outranks the saved one — it is the newest thing the
+    user told us. "I am vegetarian" beside a chicken plate has to warn in that same reply, not
+    log the chicken quietly and remember the diet only afterwards.
+    """
+    if isinstance(stated_in_message, DietaryConstraint):
+        return (stated_in_message,)
+    return diets(memories)
 
 
 def diets(memories: Sequence[MemoryRecord]) -> tuple[DietaryConstraint, ...]:

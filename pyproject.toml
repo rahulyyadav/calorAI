@@ -24,6 +24,7 @@ dev = [
 
 [project.scripts]
 calorai = "calorai_agent.cli:main"
+calorai-whatsapp = "calorai_agent.whatsapp_server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/calorai_agent"]

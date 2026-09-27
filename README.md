@@ -9,7 +9,11 @@ This repository deliberately separates the **agent core** from its delivery chan
 
 ## Current status
 
-Phases 0 to 4 are complete. The repository contains a locally runnable LangGraph vertical slice with SQLite persistence, deterministic nutrition reference data, typed meal tools, timezone-correct daily totals, and a CLI. Corrections are written as immutable meal revisions inside one transaction, ambiguous requests ask one focused question instead of guessing, refusals and impossible portions never reach a persisted row, and retried inbound messages are answered from an exactly-once event ledger. A text-model planner implements the same interface as the deterministic one and falls back to it on any unusable output, so the slice still runs without API keys. Memory survives a restart as typed records with confidence and provenance: a stated diet shapes later log replies, a protein or calorie target turns totals into progress, and `my usual` replays a saved routine as a new meal. A changed fact supersedes the one it replaces instead of contradicting it, and retrieval is bounded per kind — one diet, one target per nutrient, a few routines — so no saved habit can evict the facts every reply depends on. A photo takes its own path: bytes are checked against their signature before anything is billed, a dedicated vision model reports only the foods and portions it can separate, and the application prices every line from the reference table, so no model's calorie guess reaches the database. The caption beside a photo modifies that plate instead of becoming a second meal — `half of this` halves it, `2 cups of rice` outranks the model's portion, `my usual` cannot also replay a saved routine — and a read too shaky to price asks one focused question while a shaky-but-close one logs a disclosed estimate. Confidence and the model that read the photo are stored with the meal. WhatsApp arrives in the next phase and is not claimed as implemented yet.
+Phases 0 to 4 are complete. The repository contains a locally runnable LangGraph vertical slice with SQLite persistence, deterministic nutrition reference data, typed meal tools, timezone-correct daily totals, and a CLI. Corrections are written as immutable meal revisions inside one transaction, ambiguous requests ask one focused question instead of guessing, refusals and impossible portions never reach a persisted row, and retried inbound messages are answered from an exactly-once event ledger. A text-model planner implements the same interface as the deterministic one and falls back to it on any unusable output, so the slice still runs without API keys. Memory survives a restart as typed records with confidence and provenance: a stated diet shapes later log replies, a protein or calorie target turns totals into progress, and `my usual` replays a saved routine as a new meal. A changed fact supersedes the one it replaces instead of contradicting it, and retrieval is bounded per kind — one diet, one target per nutrient, a few routines — so no saved habit can evict the facts every reply depends on. A photo takes its own path: bytes are checked against their signature before anything is billed, a dedicated vision model reports only the foods and portions it can separate, and the application prices every line from the reference table, so no model's calorie guess reaches the database. The caption beside a photo modifies that plate instead of becoming a second meal — `half of this` halves it, `2 cups of rice` outranks the model's portion, `my usual` cannot also replay a saved routine — and a read too shaky to price asks one focused question while a shaky-but-close one logs a disclosed estimate. Confidence and the model that read the photo are stored with the meal. WhatsApp is now the second
+transport for the same graph: a signed Cloud API webhook verifies the delivery, normalizes text and
+photo messages into the envelope the CLI already used, acknowledges inside the request thread and
+answers behind it, and replies through the Graph API. An unlisted number never reaches the agent,
+and Meta's retries are the same inbound event rather than a second meal.
 
 Start with:
 
@@ -30,7 +34,8 @@ Start with:
 ## Proposed stack
 
 - Python 3.12
-- FastAPI for webhook and health endpoints
+- A stdlib `ThreadingHTTPServer` for the webhook, in front of a framework-free `WebhookApplication`
+  (the phase added no dependency; the same object can be mounted on FastAPI unchanged)
 - LangGraph for explicit conversational state and tool routing
 - Pydantic for model/tool contracts
 - SQLite for the interview build, behind repository interfaces that can move to Postgres
@@ -95,6 +100,49 @@ key and no network:
 ```bash
 python scripts/run_photo_evals.py
 ```
+
+### On WhatsApp
+
+The WhatsApp transport is an adapter around the same graph the CLI drives, so it needs a Meta app
+and nothing else: no framework, no queue, no extra dependency.
+
+1. On developers.facebook.com, create an app, add the **WhatsApp** product, and use the free test
+   number. It gives you a `Phone number ID` and a short-lived access token.
+2. Take the **App secret** from *App settings → Basic*, and choose your own long random
+   **verify token**.
+3. Copy `.env.example` to `.env` and fill in `CALORAI_WHATSAPP_VERIFY_TOKEN`,
+   `CALORAI_WHATSAPP_APP_SECRET`, `CALORAI_WHATSAPP_ACCESS_TOKEN` and
+   `CALORAI_WHATSAPP_PHONE_NUMBER_ID`. **These are secrets: `.env` is gitignored, and a real one
+   must never be committed or pasted into a screenshot.**
+4. List the numbers that may talk to the agent in `CALORAI_WHATSAPP_ALLOWED_USERS` (comma-separated
+   `wa_id`s, your own included). An empty list refuses everyone, so the process will not start.
+5. Serve it and expose it over HTTPS, which Meta requires:
+
+```bash
+calorai-whatsapp --port 8080
+cloudflared tunnel --url http://localhost:8080   # or: ngrok http 8080
+```
+
+6. In the WhatsApp product's **Configuration** screen, set the callback URL to
+   `https://<your-tunnel>/webhook` and the verify token to the same string you put in `.env`, then
+   subscribe to the **messages** webhook field.
+7. Send `I ate 2 dosa and a coffee` — or a photo of the plate with `half of this` — from a listed
+   number.
+
+What the transport does and does not decide:
+
+- A delivery is only accepted when `X-Hub-Signature-256` matches an HMAC of the exact raw body
+  under your app secret. Anything else is refused before it is parsed.
+- The handshake and the acknowledgement are fast: Meta is answered with a `200` first, and the
+  meal is worked on behind it, so a slow model never turns into a retry storm.
+- Meta's retries carry the same message id, so a redelivered message is the same inbound event and
+  logs at most one meal.
+- A photo's bytes come from the Graph API and pass the same signature and size checks as a CLI
+  photo, then go only to the vision model.
+- A voice note, sticker, PDF or location is answered honestly as something the agent cannot read
+  yet, rather than silently dropped.
+- Everything above is testable without any of these credentials: `pytest tests/test_whatsapp.py
+  tests/test_whatsapp_webhook.py` runs the whole path against a stand-in Graph API.
 
 Run the verification suite:
 

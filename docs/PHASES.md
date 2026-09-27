@@ -158,6 +158,38 @@ persisted state.
 
 **Evidence:** end-to-end test-number demo for text, correction, totals, and photo-plus-caption.
 
+Implemented evidence: 325 tests pass at 95% package coverage with ruff and strict mypy clean.
+`whatsapp.py` decides nothing about meals; it decides only whether an event may be trusted. An
+`X-Hub-Signature-256` is an HMAC-SHA256 of the *exact raw bytes* under the app secret, compared in
+constant time before the body is parsed, so re-serializing the JSON cannot make a forged delivery
+look valid, and the subscription handshake echoes `hub.challenge` only for our own verify token.
+`normalize_webhook` reads Meta's `entry → changes → value → messages` into the same
+`InboundMessage` envelope the CLI builds — words from `text.body`, a photo into a `MediaRef` with
+`source = whatsapp_media` carrying its own message id, a caption as the message text — and it
+authorizes every item by the number that actually sent it, falling back to the contact block's
+`wa_id` when only that names the sender, so a stranger riding in a listed conversation is refused
+and an empty allow-list refuses everyone. A delivery receipt for a message *we* sent is skipped
+rather than answered; a voice note, video, file, sticker, map pin, saved contact or button press is
+answered with one honest sentence naming what it sounded like, and because declines share the
+inbound ledger a redelivered voice note declines once. Meta's `wamid` is the deduplication key, and
+a message that arrives without one is fingerprinted from its own content, so a retry is still one
+event and at most one meal. `WebhookApplication` acknowledges first and works behind that ack
+through an injectable executor (inline in tests, a worker in the shell), sends the read receipt and
+typing indicator best-effort before the reply, and answers `INTERNAL_FAILURE_REPLY` when the agent
+itself raises — one user's failure neither stops the rest of the delivery nor pretends a meal was
+logged. `GraphClient` keeps the token in a header only, because URLs are copied into access logs,
+and reports a failure by its class rather than echoing a provider message that can carry one;
+`WhatsAppMediaSource` holds downloaded bytes to the same jpeg/png/webp signature test and 8 MB cap
+as a CLI photo. The HTTP shell is a stdlib `ThreadingHTTPServer` on a configurable path — 404 off
+path, 401 and 403 on the way in, access lines at debug level so no body or token reaches a log —
+and it added no dependency. `main()` refuses to start on half a configuration: any one of the four
+WhatsApp secrets missing, or an empty allow-list, exits 2 with the instructions to fix it. The
+secret itself stays out of the repository: `.env.example` lists the Phase 5 keys as empty values
+and `.env` remains gitignored. Known boundary: the live test-number walkthrough (text, correction,
+totals, photo-plus-caption through a public HTTPS tunnel) has not been run, since it needs the
+credentials the reviewer supplies; every claim above is exercised against a stand-in Graph API
+instead, with no key and no network.
+
 **Meta setup note:** a Meta developer app and business portfolio/WhatsApp Business Account are the important Cloud API resources. A Facebook Page may be useful for the broader business presence, but the architecture must not couple meal logging to a Page object. We will verify the exact dashboard flow against the account UI during this phase because Meta changes onboarding screens frequently.
 
 ## Phase 6 - Evals, latency, resilience, and observability

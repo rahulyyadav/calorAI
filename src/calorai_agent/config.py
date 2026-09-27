@@ -8,6 +8,17 @@ PLANNER_DETERMINISTIC = "deterministic"
 PLANNER_MODEL = "model"
 PLANNER_AUTO = "auto"
 
+GRAPH_API_BASE = "https://graph.facebook.com/v23.0"
+
+
+def _env_list(*names: str) -> tuple[str, ...]:
+    """A comma-separated allow-list, trimmed and deduplicated, keeping order."""
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            return tuple(dict.fromkeys(part.strip() for part in value.split(",") if part.strip()))
+    return ()
+
 
 def _env(*names: str, default: str) -> str:
     for name in names:
@@ -25,6 +36,14 @@ def _optional_env(*names: str) -> str | None:
     return None
 
 
+def _int_env(name: str, *, default: int) -> int:
+    value = os.getenv(name)
+    try:
+        return int(value) if value else default
+    except ValueError:
+        return default
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     database_path: Path
@@ -38,6 +57,15 @@ class Settings:
     vision_model_api_key: str | None = None
     vision_model_base_url: str = "https://api.openai.com/v1"
     request_timeout_seconds: float = 20.0
+    whatsapp_verify_token: str | None = None
+    whatsapp_app_secret: str | None = None
+    whatsapp_access_token: str | None = None
+    whatsapp_phone_number_id: str | None = None
+    whatsapp_allowed_users: tuple[str, ...] = ()
+    graph_api_base: str = GRAPH_API_BASE
+    webhook_host: str = "127.0.0.1"
+    webhook_port: int = 8080
+    webhook_path: str = "/webhook"
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -64,6 +92,15 @@ class Settings:
                 "OPENAI_BASE_URL",
                 default="https://api.openai.com/v1",
             ),
+            whatsapp_verify_token=_optional_env("CALORAI_WHATSAPP_VERIFY_TOKEN"),
+            whatsapp_app_secret=_optional_env("CALORAI_WHATSAPP_APP_SECRET"),
+            whatsapp_access_token=_optional_env("CALORAI_WHATSAPP_ACCESS_TOKEN"),
+            whatsapp_phone_number_id=_optional_env("CALORAI_WHATSAPP_PHONE_NUMBER_ID"),
+            whatsapp_allowed_users=_env_list("CALORAI_WHATSAPP_ALLOWED_USERS"),
+            graph_api_base=_env("CALORAI_GRAPH_API_BASE", default=GRAPH_API_BASE),
+            webhook_host=_env("CALORAI_WEBHOOK_HOST", default="127.0.0.1"),
+            webhook_port=_int_env("CALORAI_WEBHOOK_PORT", default=8080),
+            webhook_path=_env("CALORAI_WEBHOOK_PATH", default="/webhook"),
         )
 
     @property
@@ -77,3 +114,21 @@ class Settings:
     @property
     def use_vision(self) -> bool:
         return self.vision_model_api_key is not None
+
+    @property
+    def use_whatsapp(self) -> bool:
+        """Half a WhatsApp configuration is worse than none.
+
+        A webhook with no app secret accepts events it cannot prove came from Meta, and one with
+        no access token accepts them and then cannot answer, so the transport stays off until all
+        four pieces are set.
+        """
+        return all(
+            value is not None
+            for value in (
+                self.whatsapp_verify_token,
+                self.whatsapp_app_secret,
+                self.whatsapp_access_token,
+                self.whatsapp_phone_number_id,
+            )
+        )

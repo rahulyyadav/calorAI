@@ -2,14 +2,26 @@ from __future__ import annotations
 
 from calorai_agent.config import Settings
 from calorai_agent.db import Database
+from calorai_agent.domain import MediaRef
 from calorai_agent.graph import MealAgent
 from calorai_agent.llm_planner import ModelPlanner
 from calorai_agent.planning import MessagePlanner, RuleBasedPlanner
 from calorai_agent.policy import AmbiguityPolicy
-from calorai_agent.providers import OpenAICompatibleClient, OpenAICompatibleVisionClient
+from calorai_agent.providers import (
+    ImagePayload,
+    OpenAICompatibleClient,
+    OpenAICompatibleVisionClient,
+)
 from calorai_agent.repository import MealRepository
 from calorai_agent.tools import MealTools
-from calorai_agent.vision import LocalFileMediaSource, VisionInterpreter
+from calorai_agent.vision import (
+    LocalFileMediaSource,
+    MediaError,
+    MediaSource,
+    VisionInterpreter,
+)
+from calorai_agent.whatsapp import GraphClient, WhatsAppMediaSource
+from calorai_agent.whatsapp_server import WebhookApplication
 
 
 def build_planner(settings: Settings) -> MessagePlanner:
@@ -29,6 +41,44 @@ def build_planner(settings: Settings) -> MessagePlanner:
     return ModelPlanner(client, model=settings.text_model)
 
 
+class EitherMediaSource:
+    """One vision pipeline that serves both transports: a CLI path or a WhatsApp media id.
+
+    The graph only ever hands over a `MediaRef`, so choosing where its bytes come from belongs
+    here rather than in the agent.
+    """
+
+    def __init__(self, local: MediaSource, whatsapp: MediaSource | None = None) -> None:
+        self.local = local
+        self.whatsapp = whatsapp
+
+    def fetch(self, media: MediaRef) -> ImagePayload:
+        if media.source == "local_path":
+            return self.local.fetch(media)
+        if self.whatsapp is None:
+            raise MediaError("WhatsApp media needs the Graph access token to be configured.")
+        return self.whatsapp.fetch(media)
+
+
+def build_graph_client(settings: Settings) -> GraphClient | None:
+    """The Meta sender is configured only once a token and a number id both exist."""
+    if settings.whatsapp_access_token is None or settings.whatsapp_phone_number_id is None:
+        return None
+    return GraphClient(
+        access_token=settings.whatsapp_access_token,
+        phone_number_id=settings.whatsapp_phone_number_id,
+        base_url=settings.graph_api_base,
+        timeout_seconds=settings.request_timeout_seconds,
+    )
+
+
+def build_media_source(settings: Settings) -> MediaSource:
+    graph = build_graph_client(settings)
+    return EitherMediaSource(
+        LocalFileMediaSource(), WhatsAppMediaSource(graph) if graph is not None else None
+    )
+
+
 def build_vision(settings: Settings) -> VisionInterpreter | None:
     """A photo needs its own model. Without one the CLI says so instead of guessing a plate."""
     if not settings.use_vision or settings.vision_model_api_key is None:
@@ -39,7 +89,15 @@ def build_vision(settings: Settings) -> VisionInterpreter | None:
         base_url=settings.vision_model_base_url,
         timeout_seconds=settings.request_timeout_seconds,
     )
-    return VisionInterpreter(client, LocalFileMediaSource(), model=settings.vision_model)
+    return VisionInterpreter(client, build_media_source(settings), model=settings.vision_model)
+
+
+def build_repository(settings: Settings) -> MealRepository:
+    database = Database(settings.database_path)
+    database.initialize()
+    repository = MealRepository(database)
+    repository.ensure_user(settings.default_user_id, settings.default_timezone)
+    return repository
 
 
 def create_agent(
@@ -49,13 +107,34 @@ def create_agent(
     policy: AmbiguityPolicy | None = None,
     vision: VisionInterpreter | None = None,
 ) -> MealAgent:
-    database = Database(settings.database_path)
-    database.initialize()
-    repository = MealRepository(database)
-    repository.ensure_user(settings.default_user_id, settings.default_timezone)
     return MealAgent(
         planner or build_planner(settings),
-        MealTools(repository),
+        MealTools(build_repository(settings)),
         policy=policy or AmbiguityPolicy(),
         vision=vision if vision is not None else build_vision(settings),
+    )
+
+
+def create_whatsapp_app(settings: Settings) -> WebhookApplication:
+    """Wire the transport: the same agent the CLI runs, reached through signed webhooks."""
+    graph = build_graph_client(settings)
+    if graph is None:
+        raise RuntimeError(
+            "WhatsApp needs CALORAI_WHATSAPP_ACCESS_TOKEN and CALORAI_WHATSAPP_PHONE_NUMBER_ID."
+        )
+    if settings.whatsapp_verify_token is None or settings.whatsapp_app_secret is None:
+        raise RuntimeError("WhatsApp needs CALORAI_WHATSAPP_VERIFY_TOKEN and _APP_SECRET.")
+    repository = build_repository(settings)
+    return WebhookApplication(
+        MealAgent(
+            build_planner(settings),
+            MealTools(repository),
+            vision=build_vision(settings),
+        ),
+        graph,
+        verify_token=settings.whatsapp_verify_token,
+        app_secret=settings.whatsapp_app_secret,
+        repository=repository,
+        timezone=settings.default_timezone,
+        allowed_users=frozenset(settings.whatsapp_allowed_users),
     )

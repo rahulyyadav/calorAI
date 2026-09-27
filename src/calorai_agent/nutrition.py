@@ -1,19 +1,9 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
-from datetime import datetime
 from decimal import Decimal
-from typing import Protocol
 
-from calorai_agent.domain import (
-    AgentIntent,
-    MealDraft,
-    MealItemDraft,
-    MealType,
-    Nutrition,
-    ParsedMessage,
-)
+from calorai_agent.domain import Nutrition
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,158 +22,81 @@ def _nutrition(calories: str, protein: str, carbs: str, fat: str) -> Nutrition:
     )
 
 
-class MessagePlanner(Protocol):
-    def parse(self, text: str, occurred_at: datetime) -> ParsedMessage: ...
-
-
 FOODS: dict[str, FoodReference] = {
-    "paratha": FoodReference(
-        "paratha",
-        "piece",
-        _nutrition("260", "6", "38", "9"),
-    ),
-    "roti": FoodReference(
-        "roti",
-        "piece",
-        _nutrition("120", "4", "24", "1"),
-    ),
-    "chai": FoodReference(
-        "milk chai",
-        "cup",
-        _nutrition("120", "3", "18", "4"),
-    ),
-    "biryani": FoodReference(
-        "biryani",
-        "serving",
-        _nutrition("600", "22", "82", "20"),
-    ),
-    "rice": FoodReference(
-        "cooked rice",
-        "cup",
-        _nutrition("205", "4", "45", "0.4"),
-    ),
-    "egg": FoodReference(
-        "egg",
-        "piece",
-        _nutrition("78", "6", "0.6", "5"),
-    ),
-    "banana": FoodReference(
-        "banana",
-        "piece",
-        _nutrition("105", "1.3", "27", "0.4"),
-    ),
+    "paratha": FoodReference("paratha", "piece", _nutrition("260", "6", "38", "9")),
+    "roti": FoodReference("roti", "piece", _nutrition("120", "4", "24", "1")),
+    "chai": FoodReference("milk chai", "cup", _nutrition("120", "3", "18", "4")),
+    "coffee": FoodReference("coffee", "cup", _nutrition("5", "0.3", "0", "0")),
+    "biryani": FoodReference("biryani", "serving", _nutrition("600", "22", "82", "20")),
+    "rice": FoodReference("cooked rice", "cup", _nutrition("205", "4", "45", "0.4")),
+    "egg": FoodReference("egg", "piece", _nutrition("78", "6", "0.6", "5")),
+    "banana": FoodReference("banana", "piece", _nutrition("105", "1.3", "27", "0.4")),
+    "apple": FoodReference("apple", "piece", _nutrition("95", "0.5", "25", "0.3")),
+    "idli": FoodReference("idli", "piece", _nutrition("39", "2", "8", "0.3")),
+    "dosa": FoodReference("dosa", "piece", _nutrition("168", "4", "24", "6")),
+    "poha": FoodReference("poha", "bowl", _nutrition("250", "5", "46", "5")),
+    "dal": FoodReference("dal", "bowl", _nutrition("180", "10", "24", "4")),
+    "paneer": FoodReference("paneer", "serving", _nutrition("260", "14", "6", "20")),
+    "chicken": FoodReference("chicken", "serving", _nutrition("250", "31", "0", "13")),
+    "fish": FoodReference("fish", "serving", _nutrition("200", "26", "0", "9")),
+    "curd": FoodReference("curd", "bowl", _nutrition("120", "8", "10", "5")),
+    "yogurt": FoodReference("yogurt", "cup", _nutrition("120", "8", "10", "5")),
+    "milk": FoodReference("milk", "glass", _nutrition("150", "8", "12", "8")),
+    "oats": FoodReference("oats", "bowl", _nutrition("160", "6", "27", "3")),
+    "bread": FoodReference("bread", "slice", _nutrition("80", "3", "14", "1")),
+    "sandwich": FoodReference("sandwich", "piece", _nutrition("300", "12", "30", "14")),
+    "pizza": FoodReference("pizza", "slice", _nutrition("285", "12", "36", "10")),
+    "burger": FoodReference("burger", "piece", _nutrition("350", "15", "30", "18")),
+    "salad": FoodReference("salad", "bowl", _nutrition("80", "3", "12", "3")),
+    "soup": FoodReference("soup", "bowl", _nutrition("120", "5", "15", "4")),
+    "nuts": FoodReference("mixed nuts", "handful", _nutrition("170", "5", "7", "15")),
+    "almond": FoodReference("almonds", "handful", _nutrition("160", "6", "6", "14")),
+    "chocolate": FoodReference("chocolate", "bar", _nutrition("230", "3", "26", "13")),
+    "biscuits": FoodReference("biscuits", "piece", _nutrition("50", "1", "8", "2")),
+    "namkeen": FoodReference("namkeen", "handful", _nutrition("160", "3", "20", "8")),
+    "smoothie": FoodReference("smoothie", "glass", _nutrition("220", "8", "40", "3")),
 }
 
-ALIASES = {
+ALIASES: dict[str, str] = {
     "parathas": "paratha",
     "rotis": "roti",
     "chapati": "roti",
     "chapatis": "roti",
+    "phulka": "roti",
+    "phulkas": "roti",
     "eggs": "egg",
     "bananas": "banana",
+    "apples": "apple",
+    "idlis": "idli",
+    "dosas": "dosa",
+    "dals": "dal",
+    "pizzas": "pizza",
+    "burgers": "burger",
+    "sandwiches": "sandwich",
+    "salads": "salad",
+    "soups": "soup",
+    "nuts": "nuts",
+    "almonds": "almond",
+    "biscuit": "biscuits",
+    "yoghurt": "yogurt",
+    "curd-yogurt": "curd",
+    "tea": "chai",
+    "coffees": "coffee",
+    "omelette": "egg",
+    "omelet": "egg",
 }
 
-NUMBER_WORDS = {
-    "a": Decimal("1"),
-    "an": Decimal("1"),
-    "one": Decimal("1"),
-    "two": Decimal("2"),
-    "three": Decimal("3"),
-    "four": Decimal("4"),
-    "half": Decimal("0.5"),
-}
 
-
-class RuleBasedPlanner:
-    """Deterministic Phase 1 planner; replaceable by a structured LLM planner later."""
-
-    _quantity_pattern = re.compile(
-        r"(?:(?P<number>\d+(?:\.\d+)?)|(?P<word>a|an|one|two|three|four|half))\s+"
-        r"(?P<food>parathas?|rotis?|chapatis?|eggs?|bananas?|cups?\s+of\s+rice)",
-        re.IGNORECASE,
-    )
-
-    def parse(self, text: str, occurred_at: datetime) -> ParsedMessage:
-        normalized = " ".join(text.lower().strip().split())
-        if self._is_totals_question(normalized):
-            return ParsedMessage(intent=AgentIntent.GET_TOTALS)
-        if self._is_meal_list_question(normalized):
-            return ParsedMessage(intent=AgentIntent.LIST_MEALS)
-
-        items = self._extract_items(normalized)
-        if not items:
-            return ParsedMessage(
-                intent=AgentIntent.UNKNOWN,
-                explanation=(
-                    "I couldn't identify a supported food yet. Try something like "
-                    "'had 2 parathas and chai for breakfast'."
-                ),
-            )
-
-        return ParsedMessage(
-            intent=AgentIntent.LOG_MEAL,
-            draft=MealDraft(
-                meal_type=self._meal_type(normalized),
-                occurred_at=occurred_at,
-                source_text=text,
-                items=tuple(items),
-                notes="Nutrition values are Phase 1 reference estimates.",
-            ),
-        )
-
-    @staticmethod
-    def _is_totals_question(text: str) -> bool:
-        return any(
-            phrase in text
-            for phrase in (
-                "how am i doing",
-                "total today",
-                "totals today",
-                "calories today",
-                "protein today",
-                "protein have i had today",
-            )
-        )
-
-    @staticmethod
-    def _is_meal_list_question(text: str) -> bool:
-        return any(phrase in text for phrase in ("what did i eat", "show meals", "meals today"))
-
-    def _extract_items(self, text: str) -> list[MealItemDraft]:
-        items: list[MealItemDraft] = []
-        consumed_foods: set[str] = set()
-        for match in self._quantity_pattern.finditer(text):
-            raw_food = match.group("food").lower()
-            key = "rice" if "rice" in raw_food else ALIASES.get(raw_food, raw_food)
-            quantity = (
-                Decimal(match.group("number"))
-                if match.group("number")
-                else NUMBER_WORDS[match.group("word").lower()]
-            )
-            items.append(self._item(key, quantity, confidence=0.95))
-            consumed_foods.add(key)
-
-        for key in FOODS:
-            aliases = {key, *(alias for alias, target in ALIASES.items() if target == key)}
-            found = any(re.search(rf"\b{re.escape(alias)}\b", text) for alias in aliases)
-            if key not in consumed_foods and found:
-                items.append(self._item(key, Decimal("1"), confidence=0.8))
-        return items
-
-    @staticmethod
-    def _item(key: str, quantity: Decimal, confidence: float) -> MealItemDraft:
-        reference = FOODS[key]
-        return MealItemDraft(
-            name=reference.canonical_name,
-            quantity=quantity,
-            unit=reference.unit,
-            nutrition=reference.nutrition.scaled(quantity),
-            confidence=confidence,
-        )
-
-    @staticmethod
-    def _meal_type(text: str) -> MealType:
-        for meal_type in (MealType.BREAKFAST, MealType.LUNCH, MealType.DINNER, MealType.SNACK):
-            if meal_type.value in text:
-                return meal_type
-        return MealType.UNSPECIFIED
+def lookup(name: str) -> FoodReference | None:
+    """Resolve a free-text or pluralized food name to its reference row."""
+    cleaned = " ".join(name.lower().strip().split())
+    if cleaned in FOODS:
+        return FOODS[cleaned]
+    aliased = ALIASES.get(cleaned)
+    if aliased:
+        return FOODS[aliased]
+    for key, candidate in FOODS.items():
+        if cleaned in (candidate.canonical_name.lower(), key):
+            return candidate
+    singular = cleaned[:-1] if cleaned.endswith("s") and not cleaned.endswith("ss") else cleaned
+    return FOODS.get(singular) or FOODS.get(ALIASES.get(singular, ""))

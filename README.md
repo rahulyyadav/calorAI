@@ -9,7 +9,7 @@ This repository deliberately separates the **agent core** from its delivery chan
 
 ## Current status
 
-Phases 0 and 1 are complete. The repository contains a locally runnable LangGraph vertical slice with SQLite persistence, deterministic nutrition reference data, typed meal tools, timezone-correct daily totals, and a CLI. Corrections, persistent memory, vision, and WhatsApp arrive in subsequent phases and are not claimed as implemented yet.
+Phases 0 to 2 are complete. The repository contains a locally runnable LangGraph vertical slice with SQLite persistence, deterministic nutrition reference data, typed meal tools, timezone-correct daily totals, and a CLI. Corrections are written as immutable meal revisions inside one transaction, ambiguous requests ask one focused question instead of guessing, refusals and impossible portions never reach a persisted row, and retried inbound messages are answered from an exactly-once event ledger. A text-model planner implements the same interface as the deterministic one and falls back to it on any unusable output, so the slice still runs without API keys. Persistent memory, vision, and WhatsApp arrive in subsequent phases and are not claimed as implemented yet.
 
 Start with:
 
@@ -58,6 +58,8 @@ Try:
 had 2 parathas and chai for breakfast
 how am I doing today?
 what did I eat today?
+actually that was 3 parathas
+no eggs
 ```
 
 Run the verification suite:

@@ -1,0 +1,201 @@
+from datetime import UTC, datetime
+from decimal import Decimal
+
+import pytest
+
+from calorai_agent.domain import AgentIntent, MealType
+from calorai_agent.planning import PlannerRequest, RuleBasedPlanner
+from calorai_agent.policy import UNUSABLE_QUANTITY_CONFIDENCE
+
+NOW = datetime(2026, 9, 26, 8, tzinfo=UTC)
+
+
+def _request(text: str) -> PlannerRequest:
+    return PlannerRequest(text=text, occurred_at=NOW, timezone="UTC")
+
+
+def test_parses_multiple_foods_and_scales_nutrition() -> None:
+    parsed = RuleBasedPlanner().parse(_request("had 2 parathas and chai for breakfast"))
+
+    assert parsed.intent is AgentIntent.LOG_MEAL
+    assert parsed.draft is not None
+    assert parsed.draft.meal_type is MealType.BREAKFAST
+    assert [item.name for item in parsed.draft.items] == ["paratha", "milk chai"]
+    assert parsed.draft.items[0].quantity == Decimal("2")
+    assert sum(item.nutrition.calories for item in parsed.draft.items) == Decimal("640.00")
+
+
+def test_routes_totals_without_attempting_food_extraction() -> None:
+    parsed = RuleBasedPlanner().parse(_request("how much protein have I had today?"))
+
+    assert parsed.intent is AgentIntent.GET_TOTALS
+    assert parsed.draft is None
+
+
+def test_unknown_food_requests_actionable_input() -> None:
+    parsed = RuleBasedPlanner().parse(_request("I ate something nice"))
+
+    assert parsed.intent is AgentIntent.UNKNOWN
+    assert "2 parathas" in (parsed.explanation or "")
+
+
+def test_fraction_after_food_name_is_applied_to_that_food() -> None:
+    parsed = RuleBasedPlanner().parse(_request("leftover biryani, maybe two thirds of the box"))
+
+    assert parsed.draft is not None
+    item = parsed.draft.items[0]
+    assert item.name == "biryani"
+    assert abs(item.quantity - Decimal("0.667")) < Decimal("0.01")
+    assert item.confidence < 0.8  # hedged wording must lower, not raise, confidence
+
+
+def test_skipped_meal_is_acknowledged_without_logging() -> None:
+    parsed = RuleBasedPlanner().parse(_request("skipped lunch"))
+
+    assert parsed.intent is AgentIntent.ACKNOWLEDGE
+    assert parsed.draft is None
+
+
+def test_vague_grazing_asks_exactly_one_question() -> None:
+    parsed = RuleBasedPlanner().parse(_request("skipped lunch but grazed all afternoon"))
+
+    assert parsed.intent is AgentIntent.CLARIFY
+    assert parsed.question is not None
+    assert parsed.question.count("?") == 1
+
+
+def test_correction_words_produce_a_revision_with_a_reference() -> None:
+    parsed = RuleBasedPlanner().parse(_request("actually that was 3 rotis not 2"))
+
+    assert parsed.intent is AgentIntent.REVISE_MEAL
+    assert parsed.reference is not None
+    assert parsed.reference.food_hint == "roti"
+    assert parsed.items[0].quantity == Decimal("3")
+
+
+def test_repeat_of_yesterday_needs_no_items() -> None:
+    parsed = RuleBasedPlanner().parse(_request("same as yesterday"))
+
+    assert parsed.intent is AgentIntent.REPEAT_MEAL
+    assert parsed.reference is not None
+    assert parsed.reference.day_offset == -1
+
+
+def test_named_food_with_retry_word_logs_rather_than_repeats() -> None:
+    parsed = RuleBasedPlanner().parse(_request("I had biryani again"))
+
+    assert parsed.intent is AgentIntent.LOG_MEAL
+    assert parsed.draft is not None
+    assert parsed.draft.items[0].name == "biryani"
+
+
+def test_delete_takes_precedence_over_logging_the_named_food() -> None:
+    parsed = RuleBasedPlanner().parse(_request("delete the pizza I just logged"))
+
+    assert parsed.intent is AgentIntent.DELETE_MEAL
+    assert parsed.reference is not None
+    assert parsed.reference.food_hint == "pizza"
+
+
+def test_repeat_names_the_target_meal_without_a_food_hint() -> None:
+    parsed = RuleBasedPlanner().parse(_request("same as yesterday for dinner"))
+
+    assert parsed.intent is AgentIntent.REPEAT_MEAL
+    assert parsed.reference is not None
+    assert parsed.reference.day_offset == -1
+    assert parsed.target_meal_type is MealType.DINNER
+    # The target slot must not leak into the pointer, or "dinner" resolves as a food hint.
+    assert parsed.reference.food_hint is None
+
+
+def test_denied_food_is_acknowledged_instead_of_logged() -> None:
+    planner = RuleBasedPlanner()
+
+    for text in (
+        "no eggs",
+        "not any rice",
+        "i had zero eggs",
+        "not rotis",
+        "i didnt have eggs",
+        "i did not have any rice",
+        "i never ate dosa",
+        "i have not had eggs",
+    ):
+        parsed = planner.parse(_request(text))
+        assert parsed.intent is AgentIntent.ACKNOWLEDGE, text
+        assert parsed.draft is None, text
+
+
+def test_a_denial_does_not_swallow_the_food_it_negates() -> None:
+    parsed = RuleBasedPlanner().parse(_request("i didnt have eggs but had 2 rotis"))
+
+    assert parsed.intent is AgentIntent.LOG_MEAL
+    assert parsed.draft is not None
+    assert [(item.name, str(item.quantity)) for item in parsed.draft.items] == [("roti", "2")]
+
+
+def test_bare_contrast_words_do_not_make_a_log_into_a_revision() -> None:
+    parsed = RuleBasedPlanner().parse(_request("dosa for lunch not dinner"))
+
+    assert parsed.intent is AgentIntent.LOG_MEAL
+    assert parsed.draft is not None
+    assert parsed.draft.meal_type is MealType.LUNCH
+
+
+def test_nutrition_question_about_an_unlogged_food_is_not_a_meal() -> None:
+    parsed = RuleBasedPlanner().parse(_request("how many calories are in a pizza"))
+
+    assert parsed.intent is AgentIntent.UNKNOWN
+    assert parsed.draft is None
+    assert parsed.explanation is not None and "pizza" not in parsed.explanation
+
+
+def test_spelled_out_half_is_not_truncated() -> None:
+    parsed = RuleBasedPlanner().parse(_request("one and a half rotis"))
+
+    assert parsed.draft is not None
+    assert parsed.draft.items[0].quantity == Decimal("1.5")
+
+
+def test_repeated_food_mention_counts_the_portion_once() -> None:
+    parsed = RuleBasedPlanner().parse(_request("chicken tikka not butter chicken"))
+
+    assert parsed.draft is not None
+    assert [item.name for item in parsed.draft.items] == ["chicken"]
+    assert parsed.draft.items[0].quantity == Decimal("1")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "i had 0 rotis",
+        "0.0 eggs",
+        "i had 3 / 0 rotis",
+        "i had -2 rotis",
+        "i had 200 rotis",
+        "i had twenty rotis",
+    ],
+)
+def test_impossible_quantities_ask_instead_of_fabricating_a_portion(text: str) -> None:
+    parsed = RuleBasedPlanner().parse(_request(text))
+
+    assert parsed.draft is not None, text
+    item = parsed.draft.items[0]
+    assert item.confidence == UNUSABLE_QUANTITY_CONFIDENCE, text
+    assert item.quantity > 0, text
+
+
+def test_amount_that_matches_no_food_lowers_confidence() -> None:
+    parsed = RuleBasedPlanner().parse(_request("5 things with roti"))
+
+    assert parsed.draft is not None
+    assert parsed.draft.items[0].name == "roti"
+    assert parsed.draft.items[0].confidence == UNUSABLE_QUANTITY_CONFIDENCE
+
+
+def test_yesterday_meal_is_stamped_on_yesterday() -> None:
+    parsed = RuleBasedPlanner().parse(_request("had 2 eggs for dinner yesterday"))
+
+    assert parsed.draft is not None
+    assert parsed.draft.occurred_at.astimezone(UTC).date() == NOW.date().replace(day=25)
+    assert parsed.draft.meal_type is MealType.DINNER

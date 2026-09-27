@@ -29,7 +29,7 @@ The plan is ordered to maximize evaluator value early. Each phase ends with a de
 
 Implemented evidence: strict type checking passes, lint/format checks pass, nine tests pass with 82% package coverage, and a packaged CLI smoke test logs and retrieves a persisted meal. The Phase 1 planner intentionally uses deterministic reference foods; provider-backed interpretation remains a later concern.
 
-## Phase 2 - Corrections and conversational judgment
+## Phase 2 - Corrections and conversational judgment (complete)
 
 **Outcome:** the difficult text cases work correctly and conversationally.
 
@@ -40,6 +40,18 @@ Implemented evidence: strict type checking passes, lint/format checks pass, nine
 - Add idempotency for retried inbound events.
 
 **Evidence:** `2 rotis` corrected to `3` changes the original meal and totals exactly once; test-set text scenarios pass.
+
+Implemented evidence: 107 tests pass at 95% package coverage with ruff and strict mypy clean,
+and the packaged CLI is exercised end to end in the suite. Reference resolution
+returns RESOLVED/AMBIGUOUS/NOT_FOUND and a materially-identical candidate set resolves to the
+most recent meal instead of asking. Update and delete write immutable `meal_revisions` rows
+inside one `BEGIN IMMEDIATE` transaction, and the mutation is stamped on the inbound event
+(`003_mutation_outcomes.sql`) so a redelivered message answers from the database instead of
+mutating twice. Encoded judgment: refusals (`no eggs`, `I didn't have rotis`) and impossible
+portions (`0`, `-2`, `3 / 0`, `200`) never reach a persisted row — the first is acknowledged
+and the second drops into the policy's ask band. Corrections are held to the same confidence
+bar as fresh logs. A pointer with no day of its own still resolves shortly after midnight,
+while an explicitly dated pointer does not leak across days.
 
 ## Phase 3 - Selective persistent memory
 

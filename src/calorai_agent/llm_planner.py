@@ -248,22 +248,22 @@ def _build_items(
             continue
         if entry.quantity <= 0:
             continue
-        confidence = (
-            UNUSABLE_QUANTITY_CONFIDENCE
-            if entry.quantity > MAX_PLAUSIBLE_QUANTITY
-            else entry.confidence
-        )
+        # The ceiling is checked against the plate total, not the single line: two "30 rice"
+        # entries are an implausible meal even though neither one is on its own.
         existing = merged.get(reference.canonical_name)
+        total = entry.quantity if existing is None else existing.quantity + entry.quantity
+        confidence = (
+            UNUSABLE_QUANTITY_CONFIDENCE if total > MAX_PLAUSIBLE_QUANTITY else entry.confidence
+        )
         if existing is None:
             merged[reference.canonical_name] = MealItemDraft(
                 name=reference.canonical_name,
-                quantity=entry.quantity,
+                quantity=total,
                 unit=reference.unit,
-                nutrition=reference.nutrition.scaled(entry.quantity),
+                nutrition=reference.nutrition.scaled(total),
                 confidence=confidence,
             )
         else:
-            total = existing.quantity + entry.quantity
             merged[reference.canonical_name] = existing.model_copy(
                 update={
                     "quantity": total,

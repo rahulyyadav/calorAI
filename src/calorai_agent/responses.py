@@ -171,8 +171,9 @@ def no_reference_match(candidates: Sequence[MealRecord], *, timezone_name: str) 
 def vision_unavailable() -> str:
     """A photo needs a vision model. Without one the turn is refused, never guessed around."""
     return (
-        "I cannot read a photo until a vision model is configured — set CALORAI_VISION_MODEL "
-        "and its API key. Describe the plate instead and I will log it."
+        "I cannot read a photo until a vision model is configured — set "
+        "CALORAI_VISION_MODEL_API_KEY, or any text model key, and I will use it. Describe the "
+        "plate instead and I will log it."
     )
 
 

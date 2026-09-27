@@ -62,6 +62,17 @@ _SHARE_WORDS = {
 }
 _USUAL_REQUEST = re.compile(r"\bmy usual\b")
 
+# What a caption may ask for that a photograph cannot answer. The plate still gets logged, but
+# the request needs a message of its own — silently dropping it would leave the user believing
+# their meal had been corrected or deleted.
+_NON_PLATE_ASKS: dict[AgentIntent, str] = {
+    AgentIntent.REVISE_MEAL: "correction",
+    AgentIntent.DELETE_MEAL: "request to remove a meal",
+    AgentIntent.REPEAT_MEAL: "request to log a saved meal again",
+    AgentIntent.GET_TOTALS: "totals question",
+    AgentIntent.LIST_MEALS: "question about what you have already eaten",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class CaptionReading:
@@ -74,6 +85,8 @@ class CaptionReading:
     memory: MemoryContent | None = None
     routine_asked: bool = False
     unrecognized: tuple[str, ...] = ()
+    unlogged: tuple[str, ...] = ()
+    other_ask: str | None = None
 
 
 def read_caption(request: PlannerRequest) -> CaptionReading:
@@ -94,15 +107,31 @@ def read_caption(request: PlannerRequest) -> CaptionReading:
     memory = parsed.memory
     if not isinstance(memory, (DietaryConstraint, NutritionTarget)):
         memory = None
+    routine_asked = (
+        isinstance(parsed.memory, NamedRoutine)
+        or _USUAL_REQUEST.search(stripped.lower()) is not None
+    )
+    other_ask = _NON_PLATE_ASKS.get(parsed.intent)
+    if other_ask is not None:
+        # These words are about a different meal, so none of their portions, slots or dates may be
+        # read onto this plate — a photo sent at noon must not land on yesterday because the
+        # caption wanted yesterday's lunch deleted. Only a durable fact stays with the user.
+        return CaptionReading(
+            memory=memory,
+            routine_asked=routine_asked,
+            unrecognized=parsed.unrecognized,
+            unlogged=parsed.unlogged,
+            other_ask=other_ask,
+        )
     return CaptionReading(
         scale=plate_share(stripped),
         meal_type=meal_type_hint(stripped) or parsed.target_meal_type or MealType.UNSPECIFIED,
         day_offset=day_offset_hint(stripped),
         stated=parsed.items or (parsed.draft.items if parsed.draft is not None else ()),
         memory=memory,
-        routine_asked=isinstance(parsed.memory, NamedRoutine)
-        or _USUAL_REQUEST.search(stripped.lower()) is not None,
+        routine_asked=routine_asked,
         unrecognized=parsed.unrecognized,
+        unlogged=parsed.unlogged,
     )
 
 
@@ -123,21 +152,23 @@ def fuse(request: PlannerRequest, reading: VisionReading, policy: AmbiguityPolic
         for item in (_priced(observation) for observation in reading.observations)
         if item is not None
     )
-    items = _overlay(photo, caption.stated)
+    # The share applies to what the photo shows, never to an amount the caption stated outright:
+    # "half of this, plus a banana" is a half plate and a whole banana.
     if caption.scale != 1:
-        items = tuple(_scale(item, caption.scale) for item in items)
+        photo = tuple(_scale(item, caption.scale) for item in photo)
+    items = _overlay(photo, caption.stated)
+
+    question = _uncertain_question(items, reading, caption, policy)
+    if question is None and not items:
+        question = _nothing_to_count(reading)
+    if question is not None:
+        # Nothing can be logged this turn. A fact the caption stated is nothing the photo has to
+        # confirm first, so it is kept anyway — dropping it would make the user say it twice.
+        if caption.memory is not None:
+            return _keep_fact(caption.memory, question, caption.unlogged)
+        return ParsedMessage(intent=AgentIntent.CLARIFY, question=question)
 
     unrecognized = _unrecognized(reading, caption, items)
-    question = _uncertain_question(items, reading, caption, policy)
-    if question is not None:
-        return ParsedMessage(intent=AgentIntent.CLARIFY, question=question)
-    if not items:
-        return ParsedMessage(
-            intent=AgentIntent.CLARIFY,
-            question=_nothing_to_count(reading),
-            unrecognized=unrecognized,
-        )
-
     return ParsedMessage(
         intent=AgentIntent.LOG_MEAL,
         draft=MealDraft(
@@ -151,7 +182,22 @@ def fuse(request: PlannerRequest, reading: VisionReading, policy: AmbiguityPolic
         ),
         memory=caption.memory,
         unrecognized=unrecognized,
+        unlogged=caption.unlogged,
         reply_notes=_reply_notes(caption, photo, reading, plain=not _has_caption(request)),
+    )
+
+
+def _keep_fact(memory: MemoryContent, question: str, unlogged: tuple[str, ...]) -> ParsedMessage:
+    """Keep what the caption stated even when the photographed plate cannot become a meal.
+
+    The turn cannot log anything, so it saves the fact and then asks the photo's own question —
+    the user's dinner stays uncounted only until they answer, and the fact survives the photo.
+    """
+    return ParsedMessage(
+        intent=AgentIntent.SAVE_MEMORY,
+        memory=memory,
+        question=question,
+        unlogged=unlogged,
     )
 
 
@@ -200,13 +246,14 @@ def _uncertain_question(
     caption: CaptionReading,
     policy: AmbiguityPolicy,
 ) -> str | None:
-    """Ask once when the photo's identity is shaky in a way that could move the number.
+    """Ask once when the photo is shaky in a way that could move the number.
 
     A caption that named the food already replaced the uncertain line, so this only fires on what
     the user left for us to judge. How shaky decides whether we ask at all: a read above the
     material-confidence floor logs as a disclosed estimate, while a weaker one cannot become a
-    number and must be asked about. What we ask depends on the model's second guess — two dishes
-    far apart in nutrition earn an either/or, anything else earns the plain naming question.
+    number and must be asked about. What we ask follows the doubt: an unreadable portion asks how
+    much, a second guess far enough away to move the totals asks which of two dishes it is, and
+    anything else asks the plain naming question.
     """
     stated_names = {item.name for item in caption.stated}
     for observation in reading.observations:
@@ -215,7 +262,12 @@ def _uncertain_question(
             continue
         if item.confidence >= policy.material_confidence:
             continue
-        alternative = _other_candidate(observation, item)
+        if observation.unusable_portion:
+            return (
+                f"How much of the {item.name} was on the plate? I could not read a portion I "
+                "would trust, and I would rather ask than invent one."
+            )
+        alternative = _other_candidate(observation, item, caption.scale)
         if alternative is not None and policy.materially_differ(
             item.nutrition, alternative.nutrition
         ):
@@ -230,14 +282,20 @@ def _uncertain_question(
     return None
 
 
-def _other_candidate(observation: FoodObservation, item: MealItemDraft) -> MealItemDraft | None:
-    """The model's second guess, priced at the same portion, for a materiality comparison."""
+def _other_candidate(
+    observation: FoodObservation, item: MealItemDraft, scale: Decimal
+) -> MealItemDraft | None:
+    """The model's second guess at the same visible portion, for a materiality comparison.
+
+    Priced with the share the caption claimed: comparing a half-plate line against a whole
+    alternative would ask a different question depending on the order the foods were listed in.
+    """
     if observation.alternative is None:
         return None
     priced = _priced(
         FoodObservation(
             name=observation.alternative,
-            quantity=observation.quantity,
+            quantity=observation.quantity * scale,
             confidence=observation.confidence,
         )
     )
@@ -297,6 +355,11 @@ def _reply_notes(
         notes.append(f"I counted {shared} of the plate, as you said.")
     if caption.routine_asked:
         notes.append("Say 'remember this as my usual' and I will keep this plate.")
+    if caption.other_ask is not None:
+        notes.append(
+            f"I logged only the plate in your photo — your {caption.other_ask} belongs in a "
+            "message of its own."
+        )
     if reading.unclear and photo:
         notes.append("I only counted what I could separate in the photo.")
     if plain:

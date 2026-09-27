@@ -107,8 +107,8 @@ instead of inventing a number.
 
 **Evidence:** image-only and image-plus-caption evals; one inbound event maps to one meal; uncertain image asks one focused question.
 
-Implemented evidence: 197 tests pass at 95% package coverage with ruff and strict mypy clean, and
-`python scripts/run_photo_evals.py` runs 10 image-only and image-plus-caption scenarios through the
+Implemented evidence: 206 tests pass at 95% package coverage with ruff and strict mypy clean, and
+`python scripts/run_photo_evals.py` runs 14 image-only and image-plus-caption scenarios through the
 real graph with a scripted vision answer — no API key, no network. A photo owns a graph node
 (`read_media`) and its own client: bytes are judged by their jpeg/png/webp signature, capped at
 8 MB, and only ever reach the vision model, never the text planner. The model returns one strict
@@ -119,12 +119,19 @@ then priced from the reference table — the 960 kcal on a photographed biryani 
 `origin = vision_fusion`. Fusion applies the caption as *modifiers* on the photographed plate, with
 recent meals and memory withheld from it: a stated portion outranks the model's guess line by line,
 `half of this` scales every line while `half a dosa` stays one food's portion, and `my usual` cannot
-also replay a saved routine. One inbound event therefore maps to exactly one meal, verified by a
-redelivered photo that logs one meal and shows the model one photo, and by two photos sent in the
-same second becoming two meals. Uncertainty is decided by arithmetic rather than prose: a read
-between 0.55 and 0.8 confidence logs a disclosed estimate, a weaker one asks exactly one question —
-an either/or when its second guess sits 150 kcal or 12 g protein away, the plain naming question
-otherwise — and a caption that already named the food ends the question before it is asked. Every
+also replay a saved routine. The share applies only to what the photo shows — `half of this, plus a
+banana` is a half plate and a whole banana — and a caption asking about *another* meal (a correction,
+a delete, a totals question) neither acts on that meal nor lends its date to the photo: the plate
+logs today and the request is told it belongs in a message of its own. One inbound event therefore
+maps to exactly one meal, verified by a redelivered photo that logs one meal and shows the model one
+photo, and by two photos sent in the same second becoming two meals. Uncertainty is decided by
+arithmetic rather than prose: a read between 0.55 and 0.8 confidence logs a disclosed estimate, a
+weaker one asks exactly one question — an either/or when its second guess sits 150 kcal or 12 g
+protein away, how much of a food it was when the portion (or the total two alias lines add up to) is
+one no plate could hold, the plain naming question otherwise — and a caption that already named the
+food ends the question before it is asked. A durable fact stated beside a plate that cannot be
+counted is still saved before the question is asked, and a food the caption mentioned without a
+place on the plate is named as not logged rather than dropped quietly. Every
 failure boundary answers honestly instead of guessing: no vision key configured, a file that is not
 a photo, an oversized attachment, a provider error, an empty plate, and a food the table cannot
 price (which is named, never invented). Two known boundaries: only a local CLI path is readable

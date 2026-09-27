@@ -361,7 +361,7 @@ class MealAgent:
                     source_event_id=state.get("event_id"),
                 )
             )
-            reply = f"{responses.remembered(saved.content)} {reply}"
+            reply = f"{responses.remembered(saved.content, parsed.unlogged)} {reply}"
         return {"response": reply}
 
     def _repeat_meal(self, state: AgentState) -> dict[str, str]:
@@ -439,7 +439,10 @@ class MealAgent:
                 source_event_id=state.get("event_id"),
             )
         )
-        return {"response": responses.remembered(saved.content, parsed.unlogged)}
+        # A photo turn can save the fact its caption stated even when the plate itself could not
+        # be counted; the question the photo still cannot answer rides on after the confirmation.
+        reply = responses.remembered(saved.content, parsed.unlogged)
+        return {"response": f"{reply} {parsed.question}" if parsed.question else reply}
 
     def _delete_meal(self, state: AgentState) -> dict[str, str]:
         meal = self._resolved_meal(state)

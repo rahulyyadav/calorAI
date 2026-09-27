@@ -58,6 +58,25 @@
       }
     },
     {
+      "name": "a shared plate does not halve a food the caption added",
+      "caption": "half of this, plus a banana",
+      "vision_answer": {
+        "items": [
+          {"name": "biryani", "quantity": "1.5", "confidence": 0.92, "alternative": null},
+          {"name": "curd", "quantity": "0.5", "confidence": 0.85, "alternative": null}
+        ],
+        "unclear": null
+      },
+      "sends": 1,
+      "expect": {
+        "meals": 1,
+        "asks": false,
+        "items": ["biryani", "curd", "banana"],
+        "quantities": ["0.75", "0.25", "1"],
+        "reply_contains": ["1 banana"]
+      }
+    },
+    {
       "name": "the caption's portion outranks the model's guess",
       "caption": "2 cups of rice",
       "vision_answer": {
@@ -140,6 +159,52 @@
         "meals": 1,
         "asks": false,
         "reply_contains": ["I will remember you are vegetarian", "chicken is not vegetarian"]
+      }
+    },
+    {
+      "name": "a request about another meal does not move this plate to another day",
+      "caption": "delete yesterday's lunch",
+      "vision_answer": {
+        "items": [
+          {"name": "biryani", "quantity": "1.5", "confidence": 0.92, "alternative": null},
+          {"name": "curd", "quantity": "0.5", "confidence": 0.85, "alternative": null}
+        ],
+        "unclear": null
+      },
+      "sends": 1,
+      "expect": {
+        "meals": 1,
+        "asks": false,
+        "kcal": "960",
+        "reply_contains": ["belongs in a message of its own"]
+      }
+    },
+    {
+      "name": "portions that only become absurd once they add up are asked about",
+      "caption": "",
+      "vision_answer": {
+        "items": [
+          {"name": "rice", "quantity": "30", "confidence": 0.9, "alternative": null},
+          {"name": "cooked rice", "quantity": "20", "confidence": 0.9, "alternative": null}
+        ],
+        "unclear": null
+      },
+      "sends": 1,
+      "expect": {
+        "meals": 0,
+        "asks": true,
+        "reply_contains": ["How much of the cooked rice was on the plate?"]
+      }
+    },
+    {
+      "name": "a caption stating a diet beside an unreadable plate keeps the diet",
+      "caption": "i'm vegetarian btw",
+      "vision_answer": {"items": [], "unclear": "a hand in front of the lens"},
+      "sends": 1,
+      "expect": {
+        "meals": 0,
+        "asks": true,
+        "reply_contains": ["I will remember you are vegetarian", "I could not make a meal out of"]
       }
     }
   ]

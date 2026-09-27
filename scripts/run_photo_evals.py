@@ -103,6 +103,12 @@ def run(scenario: dict[str, Any], workdir: Path) -> tuple[list[str], str]:
     if "items" in expect and meals:
         names = [item.name for item in meals[-1].items]
         check(names == expect["items"], f"expected items {expect['items']}, got {names}")
+    if "quantities" in expect and meals:
+        amounts = [str(item.quantity) for item in meals[-1].items]
+        check(
+            amounts == expect["quantities"],
+            f"expected quantities {expect['quantities']}, got {amounts}",
+        )
     if "kcal" in expect and meals:
         total = sum((meal.nutrition.calories for meal in meals), Decimal(0))
         check(total == Decimal(expect["kcal"]), f"expected {expect['kcal']} kcal, got {total}")

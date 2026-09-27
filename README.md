@@ -85,8 +85,8 @@ add a food, restate a portion, or share the plate — and never log a second one
 Without a vision key the CLI says so instead of inventing a plate:
 
 ```text
-I cannot read a photo until a vision model is configured — set CALORAI_VISION_MODEL and its API
-key. Describe the plate instead and I will log it.
+I cannot read a photo until a vision model is configured — set CALORAI_VISION_MODEL_API_KEY, or any
+text model key, and I will use it. Describe the plate instead and I will log it.
 ```
 
 The same path runs with a scripted vision answer, so a reviewer can see every photo case with no

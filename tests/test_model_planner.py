@@ -234,6 +234,24 @@ def test_an_implausible_model_quantity_downgrades_instead_of_logging(
     assert parsed.draft.items[0].confidence == UNUSABLE_QUANTITY_CONFIDENCE
 
 
+def test_model_lines_that_only_become_absurd_once_merged_are_downgraded() -> None:
+    planner, _ = _planner(
+        {
+            "intent": "log_meal",
+            "items": [
+                {"name": "roti", "quantity": 30, "confidence": 0.9},
+                {"name": "chapati", "quantity": 30, "confidence": 0.9},
+            ],
+        }
+    )
+
+    parsed = planner.parse(_request("30 rotis and 30 chapatis"))
+
+    assert parsed.draft is not None
+    assert parsed.draft.items[0].quantity == Decimal("60")
+    assert parsed.draft.items[0].confidence == UNUSABLE_QUANTITY_CONFIDENCE
+
+
 def test_a_model_revision_can_ask_to_replace_the_whole_item_list() -> None:
     planner, _ = _planner(
         {

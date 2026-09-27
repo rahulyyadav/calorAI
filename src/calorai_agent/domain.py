@@ -122,6 +122,9 @@ class FoodObservation(BaseModel):
     quantity: Decimal = Field(default=Decimal("1"), gt=0)
     confidence: float = Field(default=1.0, ge=0, le=1)
     alternative: str | None = Field(default=None, max_length=200)
+    # True when the amount is a placeholder or an implausible total, so the doubt is about the
+    # portion and not the food: the reply asks how much, not what.
+    unusable_portion: bool = False
 
 
 class MealDraft(BaseModel):

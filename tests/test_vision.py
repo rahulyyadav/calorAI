@@ -275,6 +275,50 @@ def test_the_caption_shares_the_plate_without_creating_a_second_meal(
     assert "I counted half of the plate, as you said." in response
 
 
+def test_a_shared_plate_and_a_food_named_beside_it_are_not_both_halved(
+    repository: MealRepository, tmp_path: Path
+) -> None:
+    client = SpyVisionClient(BIRYANI)
+    agent, _ = _agent(repository, client)
+
+    _send(agent, _media(_photo(tmp_path)), "half of this, plus a banana")
+
+    meal = _meals(repository)[0]
+    assert [item.quantity for item in meal.items] == [
+        Decimal("0.75"),
+        Decimal("0.25"),
+        Decimal("1"),
+    ]
+
+
+def test_a_photo_logs_the_plate_instead_of_acting_on_a_delete_written_beside_it(
+    repository: MealRepository, tmp_path: Path
+) -> None:
+    client = SpyVisionClient(BIRYANI)
+    agent, _ = _agent(repository, client)
+
+    response = _send(agent, _media(_photo(tmp_path)), "delete yesterday's lunch")
+
+    meals = _meals(repository)
+    assert len(meals) == 1
+    assert meals[0].occurred_at == NOW
+    assert [item.name for item in meals[0].items] == ["biryani", "curd"]
+    assert "your request to remove a meal belongs in a message of its own" in response
+
+
+def test_a_photo_logs_the_plate_instead_of_answering_a_totals_question(
+    repository: MealRepository, tmp_path: Path
+) -> None:
+    client = SpyVisionClient(BIRYANI)
+    agent, _ = _agent(repository, client)
+
+    response = _send(agent, _media(_photo(tmp_path)), "how am I doing today?")
+
+    assert len(_meals(repository)) == 1
+    assert "Logged 1.5 serving of biryani" in response
+    assert "your totals question belongs in a message of its own" in response
+
+
 def test_a_caption_naming_a_fraction_of_one_food_does_not_scale_the_whole_plate(
     repository: MealRepository, tmp_path: Path
 ) -> None:
@@ -481,6 +525,34 @@ def test_an_absurd_portion_from_the_model_asks_instead_of_logging(
     assert "?" in response
 
 
+def test_model_lines_that_only_look_absurd_once_added_up_ask_about_the_total(
+    repository: MealRepository, tmp_path: Path
+) -> None:
+    client = SpyVisionClient(
+        _observations(("rice", "30", 0.9, None), ("cooked rice", "20", 0.9, None))
+    )
+    agent, _ = _agent(repository, client)
+
+    response = _send(agent, _media(_photo(tmp_path)))
+
+    assert _meals(repository) == []
+    assert response.startswith("How much of the cooked rice was on the plate?")
+
+
+def test_a_portion_the_model_cannot_read_asks_how_much_rather_than_guessing(
+    repository: MealRepository, tmp_path: Path
+) -> None:
+    client = SpyVisionClient(
+        {"items": [{"name": "biryani", "quantity": "a lot", "confidence": 0.9}]}
+    )
+    agent, _ = _agent(repository, client)
+
+    response = _send(agent, _media(_photo(tmp_path)))
+
+    assert _meals(repository) == []
+    assert response.startswith("How much of the biryani was on the plate?")
+
+
 # --- one inbound event, one meal ----------------------------------------------------
 
 
@@ -550,3 +622,43 @@ def test_a_diet_stated_beside_a_photo_is_kept_and_the_plate_still_lands(
         "user-1", "1 egg for dinner", timezone="UTC", now=NOW.replace(hour=20)
     )
     assert after.count("not vegetarian") == 1
+
+
+def test_foods_stated_beside_a_photo_diet_are_named_rather_than_silently_dropped(
+    repository: MealRepository, tmp_path: Path
+) -> None:
+    client = SpyVisionClient(_observations(("chicken", "1", 0.9, None)))
+    agent, _ = _agent(repository, client)
+
+    response = _send(agent, _media(_photo(tmp_path)), "i'm vegetarian btw, 2 eggs")
+
+    assert "Got it — I will remember you are vegetarian." in response
+    assert "I did not log 2 egg with it" in response
+    assert "send it again when you want it counted" in response
+    assert [item.name for item in _meals(repository)[0].items] == ["chicken"]
+
+
+def test_a_diet_stated_beside_an_unreadable_plate_is_still_kept(
+    repository: MealRepository, tmp_path: Path
+) -> None:
+    client = SpyVisionClient({"items": []})
+    agent, _ = _agent(repository, client)
+
+    response = _send(agent, _media(_photo(tmp_path)), "i'm vegetarian btw")
+
+    assert "Got it — I will remember you are vegetarian." in response
+    assert "I could not see a meal in that photo" in response
+    assert _meals(repository) == []
+
+
+def test_a_diet_stated_beside_a_shaky_plate_is_kept_and_the_question_still_asked(
+    repository: MealRepository, tmp_path: Path
+) -> None:
+    client = SpyVisionClient(_observations(("rice", "1", 0.3, None)))
+    agent, _ = _agent(repository, client)
+
+    response = _send(agent, _media(_photo(tmp_path)), "i'm vegetarian btw")
+
+    assert "Got it — I will remember you are vegetarian." in response
+    assert "What is the cooked rice in this photo?" in response
+    assert _meals(repository) == []

@@ -266,6 +266,8 @@ def test_repeated_food_mention_counts_the_portion_once() -> None:
         "i had -2 rotis",
         "i had 200 rotis",
         "i had twenty rotis",
+        "i had 20 rotis and 25 rotis",
+        "35 rice and 10 rice",
     ],
 )
 def test_impossible_quantities_ask_instead_of_fabricating_a_portion(text: str) -> None:

@@ -319,6 +319,45 @@ def test_a_photo_logs_the_plate_instead_of_answering_a_totals_question(
     assert "your totals question belongs in a message of its own" in response
 
 
+def test_a_diet_written_beside_a_photo_cannot_hide_a_request_about_another_meal(
+    repository: MealRepository, tmp_path: Path
+) -> None:
+    client = SpyVisionClient(BIRYANI)
+    agent, _ = _agent(repository, client)
+
+    response = _send(agent, _media(_photo(tmp_path)), "i'm vegetarian, delete yesterday's lunch")
+
+    meals = _meals(repository)
+    assert len(meals) == 1
+    assert meals[0].occurred_at == NOW
+    assert "Got it — I will remember you are vegetarian." in response
+    assert "your request to remove a meal belongs in a message of its own" in response
+
+
+def test_a_photo_is_not_dated_by_a_caption_that_only_compares_another_meal(
+    repository: MealRepository, tmp_path: Path
+) -> None:
+    client = SpyVisionClient(BIRYANI)
+    agent, _ = _agent(repository, client)
+
+    _send(agent, _media(_photo(tmp_path)), "this looks better than yesterday's lunch")
+
+    assert len(_meals(repository)) == 1
+    assert repository.list_for_day("user-1", date(2026, 9, 25)) == []
+
+
+def test_a_caption_portion_that_only_turns_absurd_when_it_adds_up_asks(
+    repository: MealRepository, tmp_path: Path
+) -> None:
+    client = SpyVisionClient(BIRYANI)
+    agent, _ = _agent(repository, client)
+
+    response = _send(agent, _media(_photo(tmp_path)), "20 rotis and 25 rotis")
+
+    assert _meals(repository) == []
+    assert "roti" in response
+
+
 def test_a_caption_naming_a_fraction_of_one_food_does_not_scale_the_whole_plate(
     repository: MealRepository, tmp_path: Path
 ) -> None:

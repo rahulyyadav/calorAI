@@ -33,6 +33,7 @@ from calorai_agent.planning import (
     RuleBasedPlanner,
     day_offset_hint,
     local_time,
+    meal_ask_hint,
     meal_type_hint,
 )
 from calorai_agent.policy import AmbiguityPolicy
@@ -111,7 +112,7 @@ def read_caption(request: PlannerRequest) -> CaptionReading:
         isinstance(parsed.memory, NamedRoutine)
         or _USUAL_REQUEST.search(stripped.lower()) is not None
     )
-    other_ask = _NON_PLATE_ASKS.get(parsed.intent)
+    other_ask = _ask_about_other_meal(parsed, stripped)
     if other_ask is not None:
         # These words are about a different meal, so none of their portions, slots or dates may be
         # read onto this plate — a photo sent at noon must not land on yesterday because the
@@ -123,16 +124,33 @@ def read_caption(request: PlannerRequest) -> CaptionReading:
             unlogged=parsed.unlogged,
             other_ask=other_ask,
         )
+    stated = parsed.items or (parsed.draft.items if parsed.draft is not None else ())
     return CaptionReading(
         scale=plate_share(stripped),
         meal_type=meal_type_hint(stripped) or parsed.target_meal_type or MealType.UNSPECIFIED,
-        day_offset=day_offset_hint(stripped),
-        stated=parsed.items or (parsed.draft.items if parsed.draft is not None else ()),
+        # A day named in a caption moves the plate only when the caption says what was eaten that
+        # day. "this looks better than yesterday's lunch" names another meal, not this plate, and
+        # a photo taken now is today's food whatever it is being compared with.
+        day_offset=day_offset_hint(stripped) if stated else 0,
+        stated=stated,
         memory=memory,
         routine_asked=routine_asked,
         unrecognized=parsed.unrecognized,
         unlogged=parsed.unlogged,
     )
+
+
+def _ask_about_other_meal(parsed: ParsedMessage, text: str) -> str | None:
+    """Name the request a caption makes about a meal other than the photographed plate.
+
+    The planner answers a durable fact before it looks for a request, so "i'm vegetarian, delete
+    yesterday's lunch" arrives as a memory and the delete would vanish unheard. The words are
+    scanned as well as the intent the planner settled on.
+    """
+    for intent in (parsed.intent, meal_ask_hint(text)):
+        if intent is not None and intent in _NON_PLATE_ASKS:
+            return _NON_PLATE_ASKS[intent]
+    return None
 
 
 def plate_share(text: str) -> Decimal:

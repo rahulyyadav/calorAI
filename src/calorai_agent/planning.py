@@ -191,6 +191,9 @@ REPEAT_WORDS = ("same as", "same for", "same thing", "what i had", "repeat", "us
 # adds the banana, because the copy is what the message is built on.
 ANAPHORIC_REPEAT_WORDS = ("same as", "same for", "same thing", "what i had")
 
+# Phrases that ask what is already on the record rather than naming a plate to log.
+LIST_QUESTION_PHRASES = ("what did i eat", "show meals", "meals today", "what have i eaten")
+
 # A memory statement is its own turn: the agent records the fact and answers that, rather
 # than logging food and updating a preference in the same breath.
 _DIET_PHRASES = "|".join(
@@ -385,6 +388,36 @@ def day_offset_hint(text: str) -> int:
     return _day_offset(" ".join(text.lower().strip().split()))
 
 
+def _is_totals_question(text: str) -> bool:
+    return _contains(text, TOTALS_PHRASES) and _FOOD_PATTERN.search(text) is None
+
+
+def _is_list_question(text: str) -> bool:
+    return any(phrase in text for phrase in LIST_QUESTION_PHRASES)
+
+
+def meal_ask_hint(text: str) -> AgentIntent | None:
+    """A request about a meal already on the record, read off the words rather than the intent.
+
+    A photo caption can state a durable fact and ask for a correction in the same breath, and the
+    memory check answers first — so the intent the planner settles on hides the request. This
+    scans for the cues alone, and deliberately narrower than the planner's own branch: a caption
+    like "my usual biryani" repeats nothing, it describes the plate.
+    """
+    lowered = " ".join(text.lower().strip().split())
+    if _is_totals_question(lowered):
+        return AgentIntent.GET_TOTALS
+    if _is_list_question(lowered):
+        return AgentIntent.LIST_MEALS
+    if _contains(lowered, DELETE_WORDS):
+        return AgentIntent.DELETE_MEAL
+    if _contains(lowered, REVISION_WORDS):
+        return AgentIntent.REVISE_MEAL
+    if _contains(lowered, ANAPHORIC_REPEAT_WORDS):
+        return AgentIntent.REPEAT_MEAL
+    return None
+
+
 class RuleBasedPlanner:
     """Deterministic interpreter for the supported food vocabulary.
 
@@ -406,9 +439,9 @@ class RuleBasedPlanner:
         remembered = self._stated_memory(request, text)
         if remembered is not None:
             return remembered
-        if self._is_totals_question(text):
+        if _is_totals_question(text):
             return ParsedMessage(intent=AgentIntent.GET_TOTALS, reference=_reference(text))
-        if self._is_list_question(text):
+        if _is_list_question(text):
             return ParsedMessage(intent=AgentIntent.LIST_MEALS, reference=_reference(text))
         if _contains(text, DELETE_WORDS):
             return ParsedMessage(
@@ -446,17 +479,6 @@ class RuleBasedPlanner:
         if _contains(text, REPEAT_WORDS):
             return self._repeat(request, (), text)
         return self._without_items(text)
-
-    @staticmethod
-    def _is_totals_question(text: str) -> bool:
-        return _contains(text, TOTALS_PHRASES) and _FOOD_PATTERN.search(text) is None
-
-    @staticmethod
-    def _is_list_question(text: str) -> bool:
-        return any(
-            phrase in text
-            for phrase in ("what did i eat", "show meals", "meals today", "what have i eaten")
-        )
 
     def _stated_memory(self, request: PlannerRequest, text: str) -> ParsedMessage | None:
         """A message whose whole point is a durable fact the agent should keep.
@@ -841,10 +863,15 @@ def _merged(previous: _Mention | None, mention: _Mention) -> _Mention:
     if previous is None:
         return mention
     explicit = previous.explicit or mention.explicit
+    total = previous.quantity + mention.quantity if explicit else Decimal(1)
+    # The plausibility ceiling applies to the meal, not to one mention of it: two lines that only
+    # become absurd once they are added up ("20 rotis and 25 rotis") are a mis-parse, and a
+    # portion no plate could hold asks about itself instead of logging.
+    checked = _checked(total) if explicit else _Mention(quantity=total, explicit=False)
     return _Mention(
-        quantity=previous.quantity + mention.quantity if explicit else Decimal(1),
+        quantity=checked.quantity,
         explicit=previous.explicit and mention.explicit,
-        usable=previous.usable and mention.usable,
+        usable=previous.usable and mention.usable and checked.usable,
         denied=previous.denied and mention.denied,
     )
 

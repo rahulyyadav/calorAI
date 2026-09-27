@@ -197,6 +197,34 @@
       }
     },
     {
+      "name": "a diet stated in the same breath cannot swallow a delete request",
+      "caption": "i'm vegetarian, delete yesterday's lunch",
+      "vision_answer": {
+        "items": [
+          {"name": "biryani", "quantity": "1.5", "confidence": 0.92, "alternative": null},
+          {"name": "curd", "quantity": "0.5", "confidence": 0.85, "alternative": null}
+        ],
+        "unclear": null
+      },
+      "sends": 1,
+      "expect": {
+        "meals": 1,
+        "asks": false,
+        "kcal": "960",
+        "reply_contains": ["I will remember you are vegetarian", "belongs in a message of its own"]
+      }
+    },
+    {
+      "name": "a caption portion that only becomes absurd once it adds up is asked about",
+      "caption": "20 rotis and 25 rotis",
+      "vision_answer": {
+        "items": [{"name": "curd", "quantity": "0.5", "confidence": 0.9, "alternative": null}],
+        "unclear": null
+      },
+      "sends": 1,
+      "expect": {"meals": 0, "asks": true, "reply_contains": ["roti"]}
+    },
+    {
       "name": "a caption stating a diet beside an unreadable plate keeps the diet",
       "caption": "i'm vegetarian btw",
       "vision_answer": {"items": [], "unclear": "a hand in front of the lens"},

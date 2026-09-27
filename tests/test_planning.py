@@ -3,8 +3,8 @@ from decimal import Decimal
 
 import pytest
 
-from calorai_agent.domain import AgentIntent, MealType
-from calorai_agent.planning import PlannerRequest, RuleBasedPlanner
+from calorai_agent.domain import AgentIntent, MealItemDraft, MealRecord, MealType, Nutrition
+from calorai_agent.planning import EXPLICIT_CONFIDENCE, PlannerRequest, RuleBasedPlanner
 from calorai_agent.policy import UNUSABLE_QUANTITY_CONFIDENCE
 
 NOW = datetime(2026, 9, 26, 8, tzinfo=UTC)
@@ -151,10 +151,102 @@ def test_nutrition_question_about_an_unlogged_food_is_not_a_meal() -> None:
 
 
 def test_spelled_out_half_is_not_truncated() -> None:
-    parsed = RuleBasedPlanner().parse(_request("one and a half rotis"))
+    planner = RuleBasedPlanner()
 
-    assert parsed.draft is not None
-    assert parsed.draft.items[0].quantity == Decimal("1.5")
+    for text, expected in (
+        ("one and a half rotis", Decimal("1.5")),
+        ("two and a half rotis", Decimal("2.5")),
+        ("three and a half eggs", Decimal("3.5")),
+        ("2 and a half parathas", Decimal("2.5")),
+    ):
+        parsed = planner.parse(_request(text))
+        assert parsed.draft is not None, text
+        assert parsed.draft.items[0].quantity == expected, text
+        assert parsed.draft.items[0].confidence == EXPLICIT_CONFIDENCE, text
+
+
+def test_a_bare_restatement_corrects_instead_of_logging_a_second_meal() -> None:
+    logged = _meal("u", (("roti", Decimal("2")),))
+    parsed = RuleBasedPlanner().parse(
+        PlannerRequest(
+            text="that was 3 rotis", occurred_at=NOW, timezone="UTC", recent_meals=(logged,)
+        )
+    )
+
+    assert parsed.intent is AgentIntent.REVISE_MEAL
+    assert parsed.reference is not None
+    assert parsed.reference.food_hint == "roti"
+    assert parsed.replace_items is False
+
+
+def test_a_restatement_with_nothing_to_correct_is_still_a_new_meal() -> None:
+    parsed = RuleBasedPlanner().parse(_request("it was 2 rotis for lunch"))
+
+    assert parsed.intent is AgentIntent.LOG_MEAL
+
+
+def test_a_correction_that_names_a_new_food_replaces_the_meal() -> None:
+    logged = _meal("u", (("roti", Decimal("3")),))
+    parsed = RuleBasedPlanner().parse(
+        PlannerRequest(
+            text="actually it was 2 dosas", occurred_at=NOW, timezone="UTC", recent_meals=(logged,)
+        )
+    )
+
+    assert parsed.intent is AgentIntent.REVISE_MEAL
+    assert parsed.replace_items is True
+    # The new food cannot identify the meal to change, so it must not filter candidates.
+    assert parsed.reference is not None and parsed.reference.food_hint is None
+
+
+def test_an_additive_correction_still_merges_into_the_meal() -> None:
+    logged = _meal("u", (("roti", Decimal("3")),))
+    parsed = RuleBasedPlanner().parse(
+        PlannerRequest(
+            text="actually there was also a dosa",
+            occurred_at=NOW,
+            timezone="UTC",
+            recent_meals=(logged,),
+        )
+    )
+
+    assert parsed.intent is AgentIntent.REVISE_MEAL
+    assert parsed.replace_items is False
+
+
+def test_only_and_just_state_the_whole_meal() -> None:
+    logged = _meal("u", (("roti", Decimal("3")),))
+    parsed = RuleBasedPlanner().parse(
+        PlannerRequest(
+            text="actually it was only 2 dosas",
+            occurred_at=NOW,
+            timezone="UTC",
+            recent_meals=(logged,),
+        )
+    )
+
+    assert parsed.replace_items is True
+
+
+def _meal(user_id: str, foods: tuple[tuple[str, Decimal], ...]) -> MealRecord:
+    items = tuple(
+        MealItemDraft(
+            name=name,
+            quantity=quantity,
+            unit="piece",
+            nutrition=Nutrition(calories=120, protein_g=4, carbs_g=24, fat_g=1),
+        )
+        for name, quantity in foods
+    )
+    return MealRecord(
+        id=f"meal-{user_id}",
+        user_id=user_id,
+        meal_type=MealType.LUNCH,
+        occurred_at=NOW,
+        source_text="logged meal",
+        created_at=NOW,
+        items=items,
+    )
 
 
 def test_repeated_food_mention_counts_the_portion_once() -> None:

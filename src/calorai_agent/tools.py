@@ -39,12 +39,6 @@ class DeleteMealInput(BaseModel):
     source_event_id: str | None = None
 
 
-class GetMealsInput(BaseModel):
-    user_id: str = Field(min_length=1)
-    day: date
-    timezone: str = "UTC"
-
-
 class GetMealsInRangeInput(BaseModel):
     user_id: str = Field(min_length=1)
     start_day: date
@@ -87,9 +81,6 @@ class MealTools:
 
     def delete_meal(self, command: DeleteMealInput) -> bool:
         return self.repository.soft_delete(command.meal_id, command.source_event_id)
-
-    def get_meals(self, query: GetMealsInput) -> list[MealRecord]:
-        return self.repository.list_for_day(query.user_id, query.day, query.timezone)
 
     def get_meals_in_range(self, query: GetMealsInRangeInput) -> list[MealRecord]:
         if query.start_day > query.end_day:

@@ -159,6 +159,13 @@ REVISION_WORDS = (
     "update",
 )
 
+# "it was only rice and dal" restates the whole meal, so the correction replaces it;
+# a bare restated quantity merges into the foods that meal already listed.
+WHOLE_MEAL_RESTATE_WORDS = ("only", "just")
+
+# A correction word that adds to the meal rather than swapping it out.
+ADDITIVE_WORDS = ("also", "plus", "extra", "with", "too", "another", "on the side")
+
 REPEAT_WORDS = ("same as", "same for", "same thing", "what i had", "repeat", "usual", "again")
 
 TOTALS_PHRASES = (
@@ -315,11 +322,15 @@ class RuleBasedPlanner:
             # Every food in the message was refused ("no eggs"): nothing to log.
             return ParsedMessage(intent=AgentIntent.ACKNOWLEDGE, statement=_SKIP_STATEMENT)
         items = _items_from(stated, _contains(text, ESTIMATE_WORDS), text)
-        if items and _contains(text, REVISION_WORDS):
+        if items and (
+            _contains(text, REVISION_WORDS)
+            or _restates_a_logged_food(text, items, request.recent_meals)
+        ):
             return ParsedMessage(
                 intent=AgentIntent.REVISE_MEAL,
                 items=tuple(items),
-                reference=_reference(text, items[0].name),
+                reference=_revision_reference(text, items, request.recent_meals),
+                replace_items=_replaces_the_meal(text, items, request.recent_meals),
             )
         if items:
             return ParsedMessage(
@@ -412,7 +423,19 @@ def _contains(text: str, phrases: Sequence[str]) -> bool:
     return any(phrase in text for phrase in phrases)
 
 
-_AND_A_HALF = re.compile(r"\b(one|a|an|\d+(?:\.\d+)?)\s+and\s+a\s+half\b", re.IGNORECASE)
+_AND_A_HALF = re.compile(
+    r"\b("
+    + "|".join(sorted(NUMBER_WORDS, key=len, reverse=True))
+    + r"|\d+(?:\.\d+)?)\s+and\s+a\s+half\b",
+    re.IGNORECASE,
+)
+
+# A correction does not have to say so: "that was 3 rotis" opens by restating something
+# already on the record. Only treated as a revision when there is in fact such a meal.
+_ANAPHORIC_RESTATE = re.compile(
+    r"^(?:that|it|this|those|these)\s+(?:was|were|is|are)\b",
+    re.IGNORECASE,
+)
 
 
 def _normalize_amounts(text: str) -> str:
@@ -456,6 +479,52 @@ def _reference(text: str, food_hint: str | None = None) -> MealReference:
         meal_type=_type_hint(text),
         food_hint=food_hint,
     )
+
+
+def _restates_a_logged_food(
+    text: str, items: Sequence[MealItemDraft], recent_meals: Sequence[MealRecord]
+) -> bool:
+    """True for "that was 3 rotis": an anaphoric subject naming an already-logged food."""
+    if _ANAPHORIC_RESTATE.match(text) is None or not recent_meals:
+        return False
+    logged = {item.name for meal in recent_meals for item in meal.items}
+    return any(item.name in logged for item in items)
+
+
+def _revision_reference(
+    text: str, items: Sequence[MealItemDraft], recent_meals: Sequence[MealRecord]
+) -> MealReference:
+    reference = _reference(text, items[0].name)
+    if (
+        reference.food_hint
+        and recent_meals
+        and not any(_meal_lists(meal, reference.food_hint) for meal in recent_meals)
+    ):
+        # The correction renames the food, so the new food cannot identify the meal to
+        # change. Drop the hint and let the day/meal-type pointer resolve, or ask.
+        return reference.model_copy(update={"food_hint": None})
+    return reference
+
+
+def _meal_lists(meal: MealRecord, food_name: str) -> bool:
+    hint = food_name.lower()
+    return any(hint in item.name.lower() for item in meal.items)
+
+
+def _replaces_the_meal(
+    text: str, items: Sequence[MealItemDraft], recent_meals: Sequence[MealRecord]
+) -> bool:
+    """True when the correction restates the whole meal instead of amending one food.
+
+    "only/just" says it outright, and so does naming a food none of the logged meals
+    contain: the portion being corrected has to be the one that is being replaced.
+    """
+    if _contains(text, ADDITIVE_WORDS):
+        return False
+    if _contains(text, WHOLE_MEAL_RESTATE_WORDS):
+        return True
+    logged = {item.name for meal in recent_meals for item in meal.items}
+    return bool(logged) and all(item.name not in logged for item in items)
 
 
 def local_time(request: PlannerRequest, day_offset: int, meal_type: MealType) -> datetime:

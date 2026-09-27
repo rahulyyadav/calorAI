@@ -210,6 +210,59 @@ def test_an_ambiguous_deletion_asks_which_meal_to_remove(agent: MealAgent, clock
     assert _send(agent, clock, "calories today?", 22).endswith("across 2 meals.")
 
 
+def test_a_bare_restatement_corrects_rather_than_logging_twice(
+    agent: MealAgent, clock, repository: MealRepository
+) -> None:
+    _send(agent, clock, "2 rotis", 8)
+
+    response = _send(agent, clock, "that was 3 rotis", 9)
+    totals = repository.totals_for_day("user-1", date(2026, 9, 26))
+
+    assert response.startswith("Updated")
+    assert totals.meal_count == 1
+    assert totals.nutrition.calories == Decimal("360.00")
+
+
+def test_a_correction_to_a_different_food_replaces_the_meal(
+    agent: MealAgent, clock, repository: MealRepository
+) -> None:
+    _send(agent, clock, "3 rotis for lunch", 13, 30)
+
+    response = _send(agent, clock, "actually it was 2 dosas", 14)
+
+    assert response == (
+        "Updated your lunch at 13:30 to 2 dosa — now about 336 kcal and 8g protein."
+    )
+    assert repository.totals_for_day("user-1", date(2026, 9, 26)).nutrition.calories == Decimal(
+        "336.00"
+    )
+
+
+def test_an_additive_correction_keeps_the_foods_already_logged(
+    agent: MealAgent, clock, repository: MealRepository
+) -> None:
+    _send(agent, clock, "3 rotis for lunch", 13, 30)
+
+    _send(agent, clock, "actually there was also a dosa", 14)
+
+    assert repository.totals_for_day("user-1", date(2026, 9, 26)).nutrition.calories == Decimal(
+        "528.00"
+    )
+
+
+def test_a_day_less_pointer_does_not_rewrite_a_days_old_meal(
+    agent: MealAgent, clock, repository: MealRepository
+) -> None:
+    _send(agent, clock, "2 eggs", 8, day=23)
+
+    response = _send(agent, clock, "actually that was 5 eggs", 0, 20, day=26)
+
+    assert not response.startswith("Updated")
+    assert repository.totals_for_day("user-1", date(2026, 9, 23)).nutrition.calories == Decimal(
+        "156.00"
+    )
+
+
 def test_clarification_names_only_the_uncertain_item(agent: MealAgent, clock) -> None:
     response = _send(agent, clock, "2 rotis and 5 things with eggs", 8)
 

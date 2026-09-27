@@ -221,9 +221,16 @@ class MealAgent:
             return {"resolution": self.resolver.resolve(on_day, reference)}
         # A pointer with no day of its own ("actually 3 eggs") usually means the meal the
         # user last logged, which is still on the previous calendar day shortly after
-        # midnight. Search the recent window before claiming there is nothing to correct.
+        # midnight. Search that far back, and no further: silently rewriting a meal from
+        # days ago is worse than saying there is nothing to correct.
+        boundary = state["today"] - timedelta(days=1)
+        last_logged = [
+            meal
+            for meal in state["recent_meals"]
+            if _local_day(meal.occurred_at, state["timezone"]) >= boundary
+        ]
         return {
-            "resolution": self.resolver.resolve(state["recent_meals"], reference),
+            "resolution": self.resolver.resolve(last_logged, reference),
             "reference_from_window": True,
         }
 

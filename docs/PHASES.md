@@ -41,7 +41,7 @@ Implemented evidence: strict type checking passes, lint/format checks pass, nine
 
 **Evidence:** `2 rotis` corrected to `3` changes the original meal and totals exactly once; test-set text scenarios pass.
 
-Implemented evidence: 107 tests pass at 95% package coverage with ruff and strict mypy clean,
+Implemented evidence: 116 tests pass at 95% package coverage with ruff and strict mypy clean,
 and the packaged CLI is exercised end to end in the suite. Reference resolution
 returns RESOLVED/AMBIGUOUS/NOT_FOUND and a materially-identical candidate set resolves to the
 most recent meal instead of asking. Update and delete write immutable `meal_revisions` rows
@@ -50,8 +50,13 @@ inside one `BEGIN IMMEDIATE` transaction, and the mutation is stamped on the inb
 mutating twice. Encoded judgment: refusals (`no eggs`, `I didn't have rotis`) and impossible
 portions (`0`, `-2`, `3 / 0`, `200`) never reach a persisted row — the first is acknowledged
 and the second drops into the policy's ask band. Corrections are held to the same confidence
-bar as fresh logs. A pointer with no day of its own still resolves shortly after midnight,
-while an explicitly dated pointer does not leak across days.
+bar as fresh logs. A correction does not have to announce itself: `that was 3 rotis` updates
+the roti meal already on the record instead of logging a second one, and it only does so when
+there is such a meal. A correction that names a food the logged meals do not contain replaces
+that meal, while additive wording (`also`, `plus`) merges. A pointer with no day of its own
+still resolves shortly after midnight but reaches back no further than last night, so it can
+never silently rewrite days-old history, while an explicitly dated pointer does not leak
+across days at all.
 
 ## Phase 3 - Selective persistent memory
 

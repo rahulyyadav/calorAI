@@ -25,26 +25,35 @@ def item_summary(meal: MealRecord) -> str:
     return ", ".join(item_line(item) for item in meal.items)
 
 
-def logged(meal: MealRecord, decision: LogDecision) -> str:
+def logged(meal: MealRecord, decision: LogDecision, unrecognized: Sequence[str] = ()) -> str:
     nutrition = meal.nutrition
     if decision is LogDecision.LOG_AS_ESTIMATE:
         return (
             f"Logged about {item_summary(meal)} — roughly {nutrition.calories:.0f} kcal and "
             f"{nutrition.protein_g:.0f}g protein. That is an estimate; correct me if the "
-            "portion was different."
+            f"portion was different.{omission(unrecognized)}"
         )
     return (
         f"Logged {item_summary(meal)} — about {nutrition.calories:.0f} kcal and "
-        f"{nutrition.protein_g:.0f}g protein."
+        f"{nutrition.protein_g:.0f}g protein.{omission(unrecognized)}"
     )
 
 
-def revised(meal: MealRecord) -> str:
+def revised(meal: MealRecord, unrecognized: Sequence[str] = ()) -> str:
     nutrition = meal.nutrition
     return (
         f"Updated your {_meal_label(meal)} to {item_summary(meal)} — now about "
-        f"{nutrition.calories:.0f} kcal and {nutrition.protein_g:.0f}g protein."
+        f"{nutrition.calories:.0f} kcal and {nutrition.protein_g:.0f}g "
+        f"protein.{omission(unrecognized)}"
     )
+
+
+def omission(unrecognized: Sequence[str]) -> str:
+    """Name the foods left out, so a partial meal is never presented as complete."""
+    if not unrecognized:
+        return ""
+    named = ", ".join(unrecognized[:3])
+    return f" I don't have reference data for {named}, so it isn't counted."
 
 
 def deleted(meal: MealRecord) -> str:

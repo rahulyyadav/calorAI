@@ -245,7 +245,8 @@ class MealAgent:
         return parsed.intent.value
 
     def _log_meal(self, state: AgentState) -> dict[str, str]:
-        draft = state["parsed"].draft
+        parsed = state["parsed"]
+        draft = parsed.draft
         if draft is None:  # pragma: no cover - enforced by ParsedMessage validation
             raise ValueError("log_meal intent requires a meal draft")
         decision = self.policy.assess_items(draft.items)
@@ -254,7 +255,7 @@ class MealAgent:
         meal = self.tools.log_meal(
             LogMealInput(user_id=state["user_id"], meal=draft, source_event_id=state["event_id"])
         )
-        return {"response": responses.logged(meal, decision)}
+        return {"response": responses.logged(meal, decision, parsed.unrecognized)}
 
     def _repeat_meal(self, state: AgentState) -> dict[str, str]:
         source = self._resolved_meal(state)
@@ -294,7 +295,7 @@ class MealAgent:
         )
         if revised is None:
             return {"response": responses.not_found("that")}
-        return {"response": responses.revised(revised)}
+        return {"response": responses.revised(revised, parsed.unrecognized)}
 
     def _delete_meal(self, state: AgentState) -> dict[str, str]:
         meal = self._resolved_meal(state)

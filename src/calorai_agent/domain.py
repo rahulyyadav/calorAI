@@ -140,6 +140,7 @@ class ParsedMessage(BaseModel):
     statement: str | None = None
     explanation: str | None = None
     replace_items: bool = False
+    unrecognized: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def validate_payload(self) -> ParsedMessage:

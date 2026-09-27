@@ -1,8 +1,21 @@
 from datetime import date
 from decimal import Decimal
 
+from calorai_agent.domain import AgentIntent, MealDraft, MealItemDraft, Nutrition, ParsedMessage
 from calorai_agent.graph import MealAgent
+from calorai_agent.planning import PlannerRequest
 from calorai_agent.repository import MealRepository
+from calorai_agent.tools import MealTools
+
+
+class _ScriptedPlanner:
+    """Answers every message with one fixed decision, to test the reply wiring."""
+
+    def __init__(self, parsed: ParsedMessage) -> None:
+        self._parsed = parsed
+
+    def parse(self, request: PlannerRequest) -> ParsedMessage:
+        return self._parsed
 
 
 def _send(agent: MealAgent, clock, text: str, hour: int, minute: int = 0, day: int = 26) -> str:
@@ -269,3 +282,35 @@ def test_clarification_names_only_the_uncertain_item(agent: MealAgent, clock) ->
     assert "roti" not in response
     assert "egg" in response
     assert response.count("?") == 1
+
+
+def test_a_food_without_reference_data_is_named_instead_of_silently_missing(
+    repository: MealRepository, clock
+) -> None:
+    parsed = ParsedMessage(
+        intent=AgentIntent.LOG_MEAL,
+        draft=MealDraft(
+            occurred_at=clock(8),
+            source_text="had 2 rotis and a dragonfruit",
+            items=(
+                MealItemDraft(
+                    name="roti",
+                    quantity=Decimal("2"),
+                    unit="piece",
+                    nutrition=Nutrition(
+                        calories=Decimal(120),
+                        protein_g=Decimal(4),
+                        carbs_g=Decimal(20),
+                        fat_g=Decimal(3),
+                    ),
+                ),
+            ),
+        ),
+        unrecognized=("dragonfruit",),
+    )
+    agent = MealAgent(_ScriptedPlanner(parsed), MealTools(repository))
+
+    response = agent.invoke("user-1", "had 2 rotis and a dragonfruit", now=clock(8))
+
+    assert "Logged 2 roti" in response
+    assert "dragonfruit" in response

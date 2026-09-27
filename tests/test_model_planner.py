@@ -87,6 +87,24 @@ def test_unknown_food_names_are_dropped_and_the_rules_planner_answers() -> None:
     assert parsed.explanation is not None
 
 
+def test_a_food_without_reference_data_is_reported_alongside_the_known_ones() -> None:
+    planner, _ = _planner(
+        {
+            "intent": "log_meal",
+            "items": [
+                {"name": "roti", "quantity": 2, "confidence": 0.95},
+                {"name": "dragonfruit", "quantity": 1, "confidence": 0.9},
+            ],
+        }
+    )
+
+    parsed = planner.parse(_request("had 2 rotis and a dragonfruit"))
+
+    assert parsed.draft is not None
+    assert [item.name for item in parsed.draft.items] == ["roti"]
+    assert parsed.unrecognized == ("dragonfruit",)
+
+
 def test_provider_failure_falls_back_to_the_deterministic_planner() -> None:
     planner, _ = _planner(ModelProviderError("boom"))
 

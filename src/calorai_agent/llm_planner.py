@@ -47,6 +47,8 @@ Rules:
 - Vague descriptions such as "grazed all afternoon" need exactly one clarifying question.
 - Confidence is your certainty about the food identity and quantity, from 0 to 1.
 - A message is one meal at most.
+- If the message mentions a food outside that list, name it anyway; the application
+  decides whether it can count it.
 """
 
 
@@ -110,7 +112,7 @@ class ModelPlanner:
             return self._fallback.parse(request)
 
     def _to_parsed_message(self, decision: ModelDecision, request: PlannerRequest) -> ParsedMessage:
-        items = _build_items(decision.items)
+        items, unrecognized = _build_items(decision.items)
         reference = (
             MealReference(
                 day_offset=decision.reference.day_offset,
@@ -128,6 +130,7 @@ class ModelPlanner:
             return ParsedMessage(
                 intent=AgentIntent.LOG_MEAL,
                 draft=self._draft(request, items, decision),
+                unrecognized=unrecognized,
             )
         if decision.intent is AgentIntent.REVISE_MEAL:
             if not items or reference is None:
@@ -137,6 +140,7 @@ class ModelPlanner:
                 items=tuple(items),
                 reference=reference,
                 replace_items=decision.replace_items,
+                unrecognized=unrecognized,
             )
         if decision.intent is AgentIntent.DELETE_MEAL:
             if reference is None:
@@ -190,12 +194,24 @@ _UNKNOWN_EXPLANATION = (
 )
 
 
-def _build_items(model_items: tuple[ModelFoodItem, ...]) -> list[MealItemDraft]:
-    """Translate model-identified foods into reference-backed nutrition rows."""
+def _build_items(
+    model_items: tuple[ModelFoodItem, ...],
+) -> tuple[list[MealItemDraft], tuple[str, ...]]:
+    """Translate model-identified foods into reference-backed nutrition rows.
+
+    Foods with no reference entry cannot be priced in nutrition, so they are not logged --
+    but they are reported back rather than dropped, so a partial meal is never presented
+    as a complete one.
+    """
     merged: dict[str, MealItemDraft] = {}
+    unknown: list[str] = []
     for entry in model_items:
         reference = lookup(entry.name)
-        if reference is None or entry.quantity <= 0:
+        if reference is None:
+            if entry.name not in unknown:
+                unknown.append(entry.name)
+            continue
+        if entry.quantity <= 0:
             continue
         confidence = (
             UNUSABLE_QUANTITY_CONFIDENCE
@@ -220,7 +236,7 @@ def _build_items(model_items: tuple[ModelFoodItem, ...]) -> list[MealItemDraft]:
                     "confidence": min(existing.confidence, confidence),
                 }
             )
-    return list(merged.values())
+    return list(merged.values()), tuple(unknown)
 
 
 def _render_user_prompt(request: PlannerRequest) -> str:

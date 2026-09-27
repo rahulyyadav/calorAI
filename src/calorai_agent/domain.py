@@ -60,6 +60,34 @@ class MealItemDraft(BaseModel):
     confidence: float = Field(default=1.0, ge=0, le=1)
 
 
+def combine_portions(
+    base: tuple[MealItemDraft, ...], additions: tuple[MealItemDraft, ...]
+) -> tuple[MealItemDraft, ...]:
+    """Fold extra portions into the lines they belong to, keeping the original order.
+
+    "my usual breakfast, plus a banana" is one meal: the routine's own foods with the banana
+    added to it. Nutrition is summed rather than recomputed, because both lines are priced from
+    the same reference table, so 2 idli plus 1 idli is exactly 3 idli.
+    """
+    combined = list(base)
+    for addition in additions:
+        existing = next(
+            (index for index, item in enumerate(combined) if item.name == addition.name), None
+        )
+        if existing is None:
+            combined.append(addition)
+            continue
+        line = combined[existing]
+        combined[existing] = line.model_copy(
+            update={
+                "quantity": line.quantity + addition.quantity,
+                "nutrition": line.nutrition + addition.nutrition,
+                "confidence": min(line.confidence, addition.confidence),
+            }
+        )
+    return tuple(combined)
+
+
 class InterpretationOrigin(StrEnum):
     RULE_BASED = "rule_based"
     TEXT_MODEL = "text_model"
@@ -216,6 +244,7 @@ class ParsedMessage(BaseModel):
     replace_items: bool = False
     unrecognized: tuple[str, ...] = ()
     memory: MemoryContent | None = None
+    unlogged: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def validate_payload(self) -> ParsedMessage:

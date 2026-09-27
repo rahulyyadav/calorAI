@@ -22,7 +22,7 @@ from calorai_agent.domain import (
 )
 from calorai_agent.memory import context_lines, normalized_diet
 from calorai_agent.nutrition import FOODS, lookup
-from calorai_agent.planning import PlannerRequest, RuleBasedPlanner, local_time
+from calorai_agent.planning import PlannerRequest, RuleBasedPlanner, local_time, routine_log
 from calorai_agent.policy import MAX_PLAUSIBLE_QUANTITY, UNUSABLE_QUANTITY_CONFIDENCE
 from calorai_agent.providers import ModelProviderError, TextModelClient, parse_json_object
 
@@ -168,6 +168,11 @@ class ModelPlanner:
                 raise ValueError("delete_meal decision needs a reference")
             return ParsedMessage(intent=AgentIntent.DELETE_MEAL, reference=reference)
         if decision.intent is AgentIntent.REPEAT_MEAL:
+            usual = routine_log(request, request.text.lower())
+            if usual is not None:
+                # "my usual" is a saved routine, not whichever meal happens to be recent.
+                # The rules planner owns that distinction for both planner paths.
+                return usual
             return ParsedMessage(
                 intent=AgentIntent.REPEAT_MEAL,
                 reference=reference or MealReference(day_offset=decision.day_offset),
@@ -181,10 +186,13 @@ class ModelPlanner:
                 reference=MealReference(day_offset=decision.day_offset),
             )
         if decision.intent is AgentIntent.SAVE_MEMORY:
+            memory = _build_memory(decision.memory)
             return ParsedMessage(
                 intent=AgentIntent.SAVE_MEMORY,
-                memory=_build_memory(decision.memory),
-                reference=reference,
+                memory=memory,
+                # Only a routine points at a meal. A diet or a target that arrives with a stray
+                # reference would make the graph demand a resolution and then refuse the save.
+                reference=reference if isinstance(memory, NamedRoutine) else None,
             )
         if decision.intent is AgentIntent.CLARIFY:
             return ParsedMessage(

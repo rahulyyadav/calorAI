@@ -70,7 +70,7 @@ across days at all.
 
 **Evidence:** restart process, then demonstrate vegetarian preference, protein target, and usual breakfast retrieval.
 
-Implemented evidence: 157 tests pass at 96% package coverage with ruff and strict mypy clean, and
+Implemented evidence: 161 tests pass at 95% package coverage with ruff and strict mypy clean, and
 the exit evidence is demonstrated in two separate CLI processes: `2 idlis and coffee for breakfast`
 then `remember this as my usual breakfast`, `i'm vegetarian btw`, `aim for 120g protein a day` in
 the first, and `my usual breakfast`, `1 chicken and 2 idlis`, `how am I doing today?` in the second,
@@ -82,13 +82,18 @@ confidence it was stated at and the `source_event_id` that stated it, so a redel
 crash-windowed memory message is answered from the database instead of writing twice. A new fact
 replaces the active fact in its slot in the same transaction (`memory_key` gives one `diet` slot, so
 a changed mind supersedes rather than contradicts; `active_memories` reads only the live rows, newest
-first, capped at 8 and filtered by the kinds an intent actually consumes). Retrieval is bounded twice
-over — by kind and by limit — before it reaches either planner prompt. Memory changes behavior, not
+first). Retrieval is bounded per kind — one diet, one target per nutrient, six routines — because a
+global cap would let a habit of saved routines evict the diet and the targets that shape every reply,
+and the payload reaching a planner prompt is grouped by kind and capped at 8 lines. A message can
+state a fact and a meal at once: `i'm vegetarian, had 2 idlis` keeps the diet and names the 2 idlis
+it did not log instead of dropping them. Memory changes behavior, not
 just context: a diet names the logged foods it rules out and says so once per reply, a target turns
-totals into progress, and `my usual` becomes a `LOG_MEAL` draft marked user-confirmed. An ambiguous
+totals into progress, and `my usual` becomes a `LOG_MEAL` draft marked user-confirmed, with extra
+foods in the same message (`my usual and 1 egg`) folded into the remembered lines rather than
+replacing them. An ambiguous
 routine is never guessed — an unlabeled save asks which meal to remember, `my usual lunch` with only
-a breakfast saved says which slot is missing, and two saved routines with no meal type asks instead
-of inventing a number.
+a breakfast saved says which slot is missing, and several saved routines with no meal type asks
+instead of inventing a number.
 
 ## Phase 4 - Separate vision path and multimodal fusion
 

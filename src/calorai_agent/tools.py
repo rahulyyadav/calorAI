@@ -16,7 +16,6 @@ from calorai_agent.domain import (
     MemoryKind,
     MemoryRecord,
 )
-from calorai_agent.memory import MEMORY_CONTEXT_LIMIT
 from calorai_agent.repository import MealRepository
 
 
@@ -72,7 +71,6 @@ class RememberInput(BaseModel):
 class ListMemoriesInput(BaseModel):
     user_id: str = Field(min_length=1)
     kinds: tuple[MemoryKind, ...] = ()
-    limit: int = Field(default=MEMORY_CONTEXT_LIMIT, ge=1, le=50)
 
 
 class MealTools:
@@ -112,7 +110,7 @@ class MealTools:
         return self.repository.remember(command.user_id, command.memory, command.source_event_id)
 
     def list_memories(self, query: ListMemoriesInput) -> list[MemoryRecord]:
-        return self.repository.active_memories(query.user_id, query.kinds, query.limit)
+        return self.repository.active_memories(query.user_id, query.kinds)
 
     def record_inbound(self, command: RecordInboundInput) -> InboundEvent:
         return self.repository.record_inbound(

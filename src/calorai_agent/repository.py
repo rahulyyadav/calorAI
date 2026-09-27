@@ -27,7 +27,7 @@ from calorai_agent.domain import (
     Nutrition,
     memory_key,
 )
-from calorai_agent.memory import MEMORY_CONTEXT_LIMIT
+from calorai_agent.memory import MEMORY_KIND_LIMITS
 
 _MEMORY_ADAPTER: TypeAdapter[MemoryContent] = TypeAdapter(MemoryContent)
 
@@ -347,23 +347,30 @@ class MealRepository:
         self,
         user_id: str,
         kinds: Sequence[MemoryKind] = (),
-        limit: int = MEMORY_CONTEXT_LIMIT,
     ) -> list[MemoryRecord]:
-        """The facts still standing for a user, newest first and capped."""
-        kinds_filter = f"AND memory_type IN ({', '.join('?' for _ in kinds)})" if kinds else ""
-        query = f"""
-            SELECT id, user_id, value_json, source_event_id, created_at
-            FROM memories
-            WHERE user_id = ? AND superseded_at IS NULL
-            {kinds_filter}
-            ORDER BY created_at DESC
-            LIMIT ?
+        """The facts still standing for a user, bounded per kind and newest first within it.
+
+        One shared cap would be spent by whichever kind the user saves most often, quietly
+        evicting the diet or the targets that every later reply depends on. Each kind gets its
+        own budget instead, so asking for routines can never cost the user their vegetarian
+        rule.
         """
+        records: list[MemoryRecord] = []
         with self.database.connect() as connection:
-            rows = connection.execute(
-                query, (user_id, *(kind.value for kind in kinds), limit)
-            ).fetchall()
-        return [self._memory_from_row(row) for row in rows]
+            for kind in tuple(kinds) or tuple(MEMORY_KIND_LIMITS):
+                rows = connection.execute(
+                    """
+                    SELECT id, user_id, value_json, source_event_id, created_at
+                    FROM memories
+                    WHERE user_id = ? AND superseded_at IS NULL AND memory_type = ?
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (user_id, kind.value, MEMORY_KIND_LIMITS[kind]),
+                ).fetchall()
+                records.extend(self._memory_from_row(row) for row in rows)
+        records.sort(key=lambda record: record.created_at, reverse=True)
+        return records
 
     @staticmethod
     def _memory_from_row(row: sqlite3.Row) -> MemoryRecord:

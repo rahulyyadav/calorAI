@@ -15,6 +15,7 @@ from calorai_agent.domain import (
     MealItemDraft,
     MealType,
     MemoryContent,
+    MemoryKind,
     MemoryRecord,
     NamedRoutine,
     NutrientMetric,
@@ -24,6 +25,17 @@ from calorai_agent.domain import (
 
 # A cap on what one turn carries, not on what the database keeps.
 MEMORY_CONTEXT_LIMIT = 8
+
+# How many of each kind a turn may hold. The bound is per kind on purpose: one global cap
+# would let a handful of saved routines quietly evict the diet or the targets, which are
+# usually the oldest facts and the ones that shape every later reply. A diet reads as one
+# fact (the newest), targets are keyed per nutrient, and routines need enough of the set
+# visible to tell that the choice is ambiguous.
+MEMORY_KIND_LIMITS: dict[MemoryKind, int] = {
+    MemoryKind.DIETARY_CONSTRAINT: 1,
+    MemoryKind.NUTRITION_TARGET: len(NutrientMetric),
+    MemoryKind.NAMED_ROUTINE: 6,
+}
 
 DEFAULT_ROUTINE_SLOT = "default"
 
@@ -182,5 +194,15 @@ def describe(content: MemoryContent) -> str:
 
 
 def context_lines(memories: Sequence[MemoryRecord]) -> list[str]:
-    """Memories rendered for a model prompt, newest first and capped."""
-    return [f"- {describe(record.content)}" for record in memories][:MEMORY_CONTEXT_LIMIT]
+    """Memories rendered for a model prompt, grouped by kind and capped.
+
+    Retrieval already bounds each kind; grouping keeps the order honest. Newest-first would
+    let a batch of freshly saved routines push the diet — the fact that shapes every log — off
+    the end of the cap.
+    """
+    lines = [
+        f"- {describe(content)}"
+        for group in (diets(memories), targets(memories), routines(memories))
+        for content in group
+    ]
+    return lines[:MEMORY_CONTEXT_LIMIT]

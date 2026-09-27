@@ -21,10 +21,10 @@ from calorai_agent.domain import (
     MutationKind,
     NamedRoutine,
     ParsedMessage,
+    combine_portions,
 )
 from calorai_agent.memory import (
     DEFAULT_ROUTINE_SLOT,
-    MEMORY_CONTEXT_LIMIT,
     conflicting_foods,
     current_diet,
     targets,
@@ -180,13 +180,13 @@ class MealAgent:
             )
         )
         if not event.created:
-            return self._replay(event.id, event.response_text)
+            return self._replay(event.id, event.response_text, inbound.timezone)
 
         response = self._run(inbound, event.id)
         self.tools.complete_inbound(event.id, response)
         return response
 
-    def _replay(self, event_id: str, cached: str | None) -> str:
+    def _replay(self, event_id: str, cached: str | None, timezone_name: str) -> str:
         if cached is not None:
             return cached
         remembered = self.tools.memory_for_event(event_id)
@@ -200,7 +200,7 @@ class MealAgent:
             case MutationKind.LOGGED:
                 return responses.logged(meal, self.policy.assess_items(meal.items))
             case MutationKind.REVISED:
-                return responses.revised(meal)
+                return responses.revised(meal, timezone_name=timezone_name)
             case MutationKind.DELETED:
                 return responses.deleted(meal)
         raise AssertionError(f"unhandled outcome kind {outcome.kind!r}")
@@ -232,9 +232,7 @@ class MealAgent:
             )
         )
         memories = self.tools.list_memories(
-            ListMemoriesInput(
-                user_id=state["user_id"], kinds=_CONTEXT_KINDS, limit=MEMORY_CONTEXT_LIMIT
-            )
+            ListMemoriesInput(user_id=state["user_id"], kinds=_CONTEXT_KINDS)
         )
         return {"today": today, "recent_meals": meals, "memories": memories}
 
@@ -310,12 +308,20 @@ class MealAgent:
         parsed = state["parsed"]
         today = state["today"]
         target_type = parsed.target_meal_type or source.meal_type
+        notes = f"Copied from meal {source.id} revision {source.revision_number}."
+        items = source.items
+        if parsed.items:
+            # "the same as yesterday, plus a banana" is one meal: the copy with the banana
+            # folded in, so neither half of the message goes uncounted.
+            items = combine_portions(source.items, parsed.items)
+            added = ", ".join(f"{item.quantity:g} {item.name}" for item in parsed.items)
+            notes = f"{notes} You added {added}."
         copy = MealDraft(
             meal_type=target_type,
             occurred_at=_at_local_time(today, target_type, source, state["timezone"]),
             source_text=state["message"],
-            items=source.items,
-            notes=f"Copied from meal {source.id} revision {source.revision_number}.",
+            items=items,
+            notes=notes,
         )
         logged = self.tools.log_meal(
             LogMealInput(user_id=state["user_id"], meal=copy, source_event_id=state["event_id"])
@@ -323,7 +329,15 @@ class MealAgent:
         label = responses.day_label(
             _local_day(source.occurred_at, state["timezone"]), today
         ).lower()
-        return {"response": responses.repeated(source, logged, label)}
+        return {
+            "response": responses.repeated(
+                source,
+                logged,
+                label,
+                _meal_notes(parsed.unrecognized, state["memories"], logged.items),
+                timezone_name=state["timezone"],
+            )
+        }
 
     def _revise_meal(self, state: AgentState) -> dict[str, str]:
         parsed = state["parsed"]
@@ -344,7 +358,7 @@ class MealAgent:
         if revised is None:
             return {"response": responses.not_found("that")}
         notes = _meal_notes(parsed.unrecognized, state["memories"], revised.items)
-        return {"response": responses.revised(revised, notes)}
+        return {"response": responses.revised(revised, notes, timezone_name=state["timezone"])}
 
     def _save_memory(self, state: AgentState) -> dict[str, str]:
         parsed = state["parsed"]
@@ -360,7 +374,7 @@ class MealAgent:
                 source_event_id=state.get("event_id"),
             )
         )
-        return {"response": responses.remembered(saved.content)}
+        return {"response": responses.remembered(saved.content, parsed.unlogged)}
 
     def _delete_meal(self, state: AgentState) -> dict[str, str]:
         meal = self._resolved_meal(state)
@@ -396,18 +410,30 @@ class MealAgent:
                 timezone=state["timezone"],
             )
         )
-        return {"response": responses.meal_list(meals, responses.day_label(day, state["today"]))}
+        return {
+            "response": responses.meal_list(
+                meals, responses.day_label(day, state["today"]), timezone_name=state["timezone"]
+            )
+        }
 
     def _respond(self, state: AgentState) -> dict[str, str]:
         parsed = state["parsed"]
         resolution = state.get("resolution")
         if resolution is not None and parsed.intent in _REFERENCE_MUTATIONS:
             if state.get("reference_from_window"):
-                return {"response": responses.no_reference_match(resolution.candidates)}
+                return {
+                    "response": responses.no_reference_match(
+                        resolution.candidates, timezone_name=state["timezone"]
+                    )
+                }
             label = responses.day_label(_target_day(state), state["today"])
             if resolution.status is ResolutionStatus.AMBIGUOUS and resolution.candidates:
                 verb = _REFERENCE_VERBS[parsed.intent]
-                return {"response": responses.ambiguous(resolution.candidates, label, verb)}
+                return {
+                    "response": responses.ambiguous(
+                        resolution.candidates, label, verb, timezone_name=state["timezone"]
+                    )
+                }
             if parsed.intent is AgentIntent.SAVE_MEMORY:
                 return {"response": responses.nothing_to_remember(label)}
             return {"response": responses.not_found(label)}

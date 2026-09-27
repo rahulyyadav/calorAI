@@ -23,6 +23,7 @@ from calorai_agent.domain import (
     NamedRoutine,
     NutritionTarget,
     ParsedMessage,
+    combine_portions,
 )
 from calorai_agent.memory import (
     DEFAULT_ROUTINE_SLOT,
@@ -184,6 +185,11 @@ ADDITIVE_WORDS = ("also", "plus", "extra", "with", "too", "another", "on the sid
 
 REPEAT_WORDS = ("same as", "same for", "same thing", "what i had", "repeat", "usual", "again")
 
+# Cues that point at a meal already on the record, rather than at the foods being said now.
+# "chicken again" logs chicken; "the same as yesterday, plus a banana" copies yesterday and
+# adds the banana, because the copy is what the message is built on.
+ANAPHORIC_REPEAT_WORDS = ("same as", "same for", "same thing", "what i had")
+
 # A memory statement is its own turn: the agent records the fact and answers that, rather
 # than logging food and updating a preference in the same breath.
 _DIET_PHRASES = "|".join(
@@ -211,13 +217,15 @@ _TARGET_CUES = (
 _METRIC_NAMES = "|".join(re.escape(word) for word in sorted(METRIC_WORDS, key=len, reverse=True))
 
 # Both orders people state a target in: "120g protein" and "protein of 120g".
+# A leading minus or dot disqualifies the amount: a negative or fractional target is a typo
+# or a portion, not a durable fact worth keeping.
 _METRIC_THEN_AMOUNT = re.compile(
     r"\b(?P<metric>" + _METRIC_NAMES + r")\s*(?:target|goal|aim)?\s*(?:of|is|to|:)?\s*"
-    r"(?P<amount>\d+(?:\.\d+)?)\s*(?:g|grams?|gm|kcal)?\b",
+    r"(?<![-.\d])(?P<amount>\d+(?:\.\d+)?)\s*(?:g|grams?|gm|kcal)?\b",
     re.IGNORECASE,
 )
 _AMOUNT_THEN_METRIC = re.compile(
-    r"\b(?P<amount>\d+(?:\.\d+)?)\s*(?:g|grams?|gm)?\s*(?:of\s+)?"
+    r"(?<![-.\d])(?P<amount>\d+(?:\.\d+)?)\s*(?:g|grams?|gm)?\s*(?:of\s+)?"
     r"(?P<metric>" + _METRIC_NAMES + r")\b",
     re.IGNORECASE,
 )
@@ -372,7 +380,7 @@ class RuleBasedPlanner:
                     "i eaten today'."
                 ),
             )
-        remembered = self._stated_memory(text)
+        remembered = self._stated_memory(request, text)
         if remembered is not None:
             return remembered
         if self._is_totals_question(text):
@@ -401,12 +409,19 @@ class RuleBasedPlanner:
                 reference=_revision_reference(text, items, request.recent_meals),
                 replace_items=_replaces_the_meal(text, items, request.recent_meals),
             )
+        remembered = routine_log(request, text, tuple(items))
+        if remembered is not None:
+            return remembered
+        if items and _contains(text, ANAPHORIC_REPEAT_WORDS):
+            # "same as yesterday, plus a banana" copies a meal and adds to it: both halves of
+            # the message count, so neither the routine nor the banana goes missing.
+            return self._repeat(request, tuple(items), text)
         if items:
             return ParsedMessage(
                 intent=AgentIntent.LOG_MEAL, draft=self._draft(request, text, items)
             )
         if _contains(text, REPEAT_WORDS):
-            return self._repeat(request, text)
+            return self._repeat(request, (), text)
         return self._without_items(text)
 
     @staticmethod
@@ -420,18 +435,24 @@ class RuleBasedPlanner:
             for phrase in ("what did i eat", "show meals", "meals today", "what have i eaten")
         )
 
-    @staticmethod
-    def _stated_memory(text: str) -> ParsedMessage | None:
-        """A message whose whole point is a durable fact the agent should keep."""
+    def _stated_memory(self, request: PlannerRequest, text: str) -> ParsedMessage | None:
+        """A message whose whole point is a durable fact the agent should keep.
+
+        A message can state a fact and name a meal in one breath ("i'm vegetarian, had 2 idlis").
+        The fact is what this turn keeps, so the foods left out are named back instead of dropped:
+        a meal that went uncounted has to be visible in the reply.
+        """
+        alongside = self._stated_foods(text)
         diet = _DIET_STATEMENT.search(text)
         if diet is not None:
             return ParsedMessage(
                 intent=AgentIntent.SAVE_MEMORY,
                 memory=DietaryConstraint(diet=normalized_diet(diet.group("diet"))),
+                unlogged=alongside,
             )
         target = _nutrition_target(text)
         if target is not None:
-            return ParsedMessage(intent=AgentIntent.SAVE_MEMORY, memory=target)
+            return ParsedMessage(intent=AgentIntent.SAVE_MEMORY, memory=target, unlogged=alongside)
         if _ROUTINE_SAVE_CUE.search(text) and _USUAL_PHRASE.search(text):
             slot = _type_hint(text)
             return ParsedMessage(
@@ -441,19 +462,18 @@ class RuleBasedPlanner:
             )
         return None
 
+    def _stated_foods(self, text: str) -> tuple[str, ...]:
+        """The foods a message names, phrased the way the user phrased them."""
+        return tuple(
+            f"{mention.quantity:g} {name}"
+            for name, mention in self._mentions(text).items()
+            if not mention.denied
+        )
+
     @staticmethod
-    def _repeat(request: PlannerRequest, text: str) -> ParsedMessage:
-        if _USUAL_PHRASE.search(text) is not None:
-            meal_type = _type_hint(text)
-            routine = routine_for(request.memories, meal_type)
-            if routine is not None:
-                return ParsedMessage(
-                    intent=AgentIntent.LOG_MEAL, draft=_routine_draft(request, routine)
-                )
-            return ParsedMessage(
-                intent=AgentIntent.CLARIFY,
-                question=_no_routine_question(request.memories, meal_type),
-            )
+    def _repeat(
+        request: PlannerRequest, extras: tuple[MealItemDraft, ...], text: str
+    ) -> ParsedMessage:
         # "same as yesterday for dinner" names the *target* slot for the copy, so it
         # must not filter the meal being copied.
         source_text = re.sub(rf"\bfor {_MEAL_WORD}\b", " ", text)
@@ -461,6 +481,7 @@ class RuleBasedPlanner:
             intent=AgentIntent.REPEAT_MEAL,
             reference=_reference(source_text),
             target_meal_type=_type_hint(text),
+            items=extras,
         )
 
     @staticmethod
@@ -626,14 +647,44 @@ def _nutrition_target(text: str) -> NutritionTarget | None:
     return None
 
 
-def _routine_draft(request: PlannerRequest, routine: NamedRoutine) -> MealDraft:
+def routine_log(
+    request: PlannerRequest, text: str, extras: tuple[MealItemDraft, ...] = ()
+) -> ParsedMessage | None:
+    """`my usual`, as the routine the user actually saved.
+
+    None when the message is not about a routine at all, so the caller keeps its own reading of
+    it. A stated extra folds into the routine instead of replacing it, because "my usual, plus a
+    banana" is one meal and silently logging only the banana would understate the day.
+    """
+    if _USUAL_PHRASE.search(text) is None:
+        return None
+    meal_type = _type_hint(text)
+    routine = routine_for(request.memories, meal_type)
+    if routine is None:
+        return ParsedMessage(
+            intent=AgentIntent.CLARIFY,
+            question=_no_routine_question(request.memories, meal_type),
+        )
+    return ParsedMessage(
+        intent=AgentIntent.LOG_MEAL, draft=_routine_draft(request, routine, extras)
+    )
+
+
+def _routine_draft(
+    request: PlannerRequest, routine: NamedRoutine, extras: tuple[MealItemDraft, ...] = ()
+) -> MealDraft:
     meal_type = routine_meal_type(routine)
+    items = combine_portions(routine.items, extras) if extras else routine.items
+    notes = f"Copied from your saved routine: {routine.slot}."
+    if extras:
+        added = ", ".join(f"{item.quantity:g} {item.name}" for item in extras)
+        notes = f"{notes} You added {added}."
     return MealDraft(
         meal_type=meal_type,
         occurred_at=local_time(request, 0, meal_type),
         source_text=request.text,
-        items=routine.items,
-        notes=f"Copied from your saved routine: {routine.slot}.",
+        items=items,
+        notes=notes,
         origin=InterpretationOrigin.USER_CONFIRMED,
     )
 

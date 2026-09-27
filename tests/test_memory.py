@@ -25,6 +25,7 @@ from calorai_agent.graph import MealAgent
 from calorai_agent.llm_planner import ModelPlanner
 from calorai_agent.memory import (
     MEMORY_CONTEXT_LIMIT,
+    MEMORY_KIND_LIMITS,
     avoided_foods,
     conflicting_foods,
     current_diet,
@@ -53,6 +54,17 @@ _CHICKEN = MealItemDraft(
         protein_g=Decimal("31"),
         carbs_g=Decimal("0"),
         fat_g=Decimal("13"),
+    ),
+)
+_PANEER = MealItemDraft(
+    name="paneer",
+    quantity=Decimal("1"),
+    unit="serving",
+    nutrition=Nutrition(
+        calories=Decimal("260"),
+        protein_g=Decimal("14"),
+        carbs_g=Decimal("6"),
+        fat_g=Decimal("20"),
     ),
 )
 
@@ -91,9 +103,11 @@ class RecordingClient:
 
     def __init__(self, payload: Any) -> None:
         self.payload = payload
+        self.system_prompts: list[str] = []
         self.user_prompts: list[str] = []
 
     def complete(self, *, system: str, user: str) -> str:
+        self.system_prompts.append(system)
         self.user_prompts.append(user)
         if isinstance(self.payload, str):
             return self.payload
@@ -201,20 +215,45 @@ def test_independent_facts_stay_active_together(repository: MealRepository) -> N
     assert len(repository.active_memories("user-1")) == 3
 
 
-def test_retrieval_is_bounded_by_type_and_count(repository: MealRepository) -> None:
-    for index in range(MEMORY_CONTEXT_LIMIT + 4):
+def test_each_kind_is_bounded_on_its_own(repository: MealRepository) -> None:
+    routine_cap = MEMORY_KIND_LIMITS[MemoryKind.NAMED_ROUTINE]
+    saved_slots = routine_cap + 4
+    for index in range(saved_slots):
+        repository.remember("user-1", NamedRoutine(slot=f"slot-{index}", items=(_IDLI,)))
+    repository.remember("user-1", DietaryConstraint(diet="vegetarian"))
+
+    retrieved = repository.active_memories("user-1")
+    loaded_routines = [
+        record.content for record in retrieved if isinstance(record.content, NamedRoutine)
+    ]
+
+    assert [routine.slot for routine in loaded_routines] == [
+        f"slot-{index}" for index in range(saved_slots - 1, saved_slots - 1 - routine_cap, -1)
+    ]
+    assert diets(retrieved) == (DietaryConstraint(diet="vegetarian"),)
+    assert repository.active_memories("user-1", kinds=(MemoryKind.NUTRITION_TARGET,)) == []
+
+
+def test_a_busy_routine_habit_costs_the_user_neither_diet_nor_targets(
+    repository: MealRepository, make_agent, clock
+) -> None:
+    """The bound is per kind, so one chatty kind cannot evict the facts every reply needs."""
+    first = make_agent()
+    _send(first, clock, "i'm vegetarian btw", 6)
+    _send(first, clock, "aim for 120g protein a day", 6)
+    _send(first, clock, "2 idlis for breakfast", 7, 15)
+    for index in range(MEMORY_KIND_LIMITS[MemoryKind.NAMED_ROUTINE] + 5):
         repository.remember("user-1", NamedRoutine(slot=f"slot-{index}", items=(_IDLI,)))
 
-    capped = repository.active_memories("user-1")
-    other_type = repository.active_memories("user-1", kinds=(MemoryKind.DIETARY_CONSTRAINT,))
-    few_routines = repository.active_memories("user-1", kinds=(MemoryKind.NAMED_ROUTINE,), limit=2)
+    reopened = make_agent()
+    logged = _send(reopened, clock, "1 chicken for lunch", 12)
+    totals = _send(reopened, clock, "how am I doing today?", 13)
 
-    assert len(capped) == MEMORY_CONTEXT_LIMIT
-    assert other_type == []
-    assert [routines.content.slot for routines in few_routines] == [  # type: ignore[attr-defined]
-        f"slot-{MEMORY_CONTEXT_LIMIT + 3}",
-        f"slot-{MEMORY_CONTEXT_LIMIT + 2}",
-    ]
+    usual = _send(reopened, clock, "my usual", 14)
+
+    assert "Heads up — chicken is not vegetarian." in logged
+    assert "Against your targets: 35 of 120 g protein." in totals
+    assert "Which one is your usual today" in usual and "slot-10" in usual
 
 
 def test_a_routine_without_foods_is_refused(repository: MealRepository) -> None:
@@ -248,6 +287,22 @@ def test_a_non_vegetarian_diet_rules_out_nothing() -> None:
     memories = [_memory(DietaryConstraint(diet="non-vegetarian"))]
 
     assert conflicting_foods(memories, [_CHICKEN]) == ()
+
+
+def test_a_vegan_diet_rules_out_dairy_that_a_vegetarian_keeps() -> None:
+    vegan = [_memory(DietaryConstraint(diet="vegan"))]
+    vegetarian = [_memory(DietaryConstraint(diet="vegetarian"))]
+
+    assert conflicting_foods(vegan, [_PANEER, _IDLI]) == ("paneer",)
+    assert conflicting_foods(vegetarian, [_PANEER]) == ()
+
+
+def test_a_saved_vegan_diet_warns_about_a_dairy_meal_after_a_restart(make_agent, clock) -> None:
+    _send(make_agent(), clock, "im vegan", 7)
+
+    response = _send(make_agent(), clock, "1 paneer for lunch", 13)
+
+    assert "Heads up — paneer is not vegan." in response
 
 
 def test_a_saved_preference_survives_a_restart_and_shapes_the_next_reply(make_agent, clock) -> None:
@@ -366,6 +421,15 @@ def test_a_memory_written_before_a_crash_still_answers_its_message(
 
 
 # --- model-backed extraction ------------------------------------------------------
+
+
+def test_the_model_prompt_treats_a_stated_fact_as_memory_not_a_meal() -> None:
+    planner, client = _model_planner({"intent": "acknowledge", "statement": "noted"})
+
+    planner.parse(PlannerRequest(text="ok", occurred_at=NOW))
+
+    assert "durable fact" in client.system_prompts[0]
+    assert '"save_memory", not a meal to log' in client.system_prompts[0]
 
 
 def test_the_model_can_ask_for_a_memory_to_be_saved() -> None:

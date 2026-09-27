@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import date
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from calorai_agent.domain import (
     DailyTotals,
@@ -48,10 +49,10 @@ def logged(meal: MealRecord, decision: LogDecision, notes: Sequence[str] = ()) -
     )
 
 
-def revised(meal: MealRecord, notes: Sequence[str] = ()) -> str:
+def revised(meal: MealRecord, notes: Sequence[str] = (), *, timezone_name: str) -> str:
     nutrition = meal.nutrition
     return (
-        f"Updated your {_meal_label(meal)} to {item_summary(meal)} — now about "
+        f"Updated your {_meal_label(meal, timezone_name)} to {item_summary(meal)} — now about "
         f"{nutrition.calories:.0f} kcal and {nutrition.protein_g:.0f}g "
         f"protein.{_notes(notes)}"
     )
@@ -74,11 +75,17 @@ def diet_conflict(diet: str, foods: Sequence[str]) -> str:
     if not foods:
         return ""
     named = ", ".join(foods[:3])
-    return f"Heads up — {named} is not {diet}. Tell me if that has changed."
+    counted = "is" if len(foods) == 1 else "are"
+    return f"Heads up — {named} {counted} not {diet}. Tell me if that has changed."
 
 
-def remembered(content: MemoryContent) -> str:
-    return f"Got it — I will remember {describe(content)}."
+def remembered(content: MemoryContent, unlogged: Sequence[str] = ()) -> str:
+    """Confirm the fact, and name the foods the same message stated but this turn did not log."""
+    kept = f"Got it — I will remember {describe(content)}."
+    if not unlogged:
+        return kept
+    named = ", ".join(unlogged[:3])
+    return f"{kept} I did not log {named} with it — send it again when you want it counted."
 
 
 def nothing_to_remember(label: str) -> str:
@@ -92,12 +99,19 @@ def deleted(meal: MealRecord) -> str:
     return f"Removed {item_summary(meal)} ({meal.nutrition.calories:.0f} kcal)."
 
 
-def repeated(source: MealRecord, copy: MealRecord, day_label: str) -> str:
+def repeated(
+    source: MealRecord,
+    copy: MealRecord,
+    day_label: str,
+    notes: Sequence[str] = (),
+    *,
+    timezone_name: str,
+) -> str:
     nutrition = copy.nutrition
     return (
         f"Logged the same as {day_label} — {item_summary(copy)}, about "
         f"{nutrition.calories:.0f} kcal and {nutrition.protein_g:.0f}g protein. "
-        f"(Original: {_meal_label(source)}.)"
+        f"(Original: {_meal_label(source, timezone_name)}.){_notes(notes)}"
     )
 
 
@@ -124,15 +138,19 @@ def target_progress(nutrition: Nutrition, targets: Sequence[NutritionTarget]) ->
     return f" Against your targets: {standing}."
 
 
-def meal_list(meals: Sequence[MealRecord], label: str) -> str:
+def meal_list(meals: Sequence[MealRecord], label: str, *, timezone_name: str) -> str:
     if not meals:
         return f"Nothing logged {label.lower()} yet."
-    described = "; ".join(f"{_meal_label(meal)}: {item_summary(meal)}" for meal in meals)
+    described = "; ".join(
+        f"{_meal_label(meal, timezone_name)}: {item_summary(meal)}" for meal in meals
+    )
     return f"{label} you logged: {described}."
 
 
-def ambiguous(candidates: Sequence[MealRecord], label: str, verb: str = "correct") -> str:
-    described = " or ".join(_meal_label(meal) for meal in candidates[:3])
+def ambiguous(
+    candidates: Sequence[MealRecord], label: str, verb: str, *, timezone_name: str
+) -> str:
+    described = " or ".join(_meal_label(meal, timezone_name) for meal in candidates[:3])
     return f"Which {label.lower()} meal do you mean to {verb} — {described}?"
 
 
@@ -140,21 +158,23 @@ def not_found(label: str) -> str:
     return f"I couldn't find a logged meal {label.lower()} to use."
 
 
-def no_reference_match(candidates: Sequence[MealRecord]) -> str:
+def no_reference_match(candidates: Sequence[MealRecord], *, timezone_name: str) -> str:
     """Reply to a pointer that only made sense against the recent window, not today."""
     if not candidates:
         return "I couldn't find a recent meal that matches."
-    described = " or ".join(_meal_label(meal) for meal in candidates[:3])
+    described = " or ".join(_meal_label(meal, timezone_name) for meal in candidates[:3])
     return f"Which of your recent meals do you mean — {described}?"
 
 
-def _meal_label(meal: MealRecord) -> str:
+def _meal_label(meal: MealRecord, timezone_name: str) -> str:
+    """A meal named the way the user would name it: its slot and its local clock time."""
     type_label = (
         meal.meal_type.value.replace("_", " ")
         if meal.meal_type is not MealType.UNSPECIFIED
         else "meal"
     )
-    return f"{type_label} at {meal.occurred_at:%H:%M}"
+    local = meal.occurred_at.astimezone(ZoneInfo(timezone_name))
+    return f"{type_label} at {local:%H:%M}"
 
 
 def _plural(count: int, noun: str) -> str:

@@ -16,8 +16,18 @@ from calorai_agent.domain import (
     MealItemDraft,
     MealRecord,
     MealType,
+    MemoryKind,
+    MemoryRecord,
     MutationKind,
+    NamedRoutine,
     ParsedMessage,
+)
+from calorai_agent.memory import (
+    DEFAULT_ROUTINE_SLOT,
+    MEMORY_CONTEXT_LIMIT,
+    conflicting_foods,
+    current_diet,
+    targets,
 )
 from calorai_agent.planning import MEAL_TIMES, MessagePlanner, PlannerRequest
 from calorai_agent.policy import AmbiguityPolicy, LogDecision
@@ -26,19 +36,40 @@ from calorai_agent.tools import (
     DeleteMealInput,
     GetDailyTotalsInput,
     GetMealsInRangeInput,
+    ListMemoriesInput,
     LogMealInput,
     MealTools,
     RecordInboundInput,
+    RememberInput,
     ReviseMealInput,
 )
 
 REFERENCE_LOOKBACK_DAYS = 3
 
 _REFERENCE_MUTATIONS = frozenset(
-    {AgentIntent.REPEAT_MEAL, AgentIntent.REVISE_MEAL, AgentIntent.DELETE_MEAL}
+    {
+        AgentIntent.REPEAT_MEAL,
+        AgentIntent.REVISE_MEAL,
+        AgentIntent.DELETE_MEAL,
+        AgentIntent.SAVE_MEMORY,
+    }
 )
 
 _NO_TOOL_CALLS = frozenset({AgentIntent.ACKNOWLEDGE, AgentIntent.CLARIFY, AgentIntent.UNKNOWN})
+
+# What an unresolved pointer was meant to do, phrased the way the reply asks about it.
+_REFERENCE_VERBS = {
+    AgentIntent.DELETE_MEAL: "delete",
+    AgentIntent.REVISE_MEAL: "correct",
+    AgentIntent.SAVE_MEMORY: "remember",
+}
+
+# The kinds a turn can act on. Memories of other kinds stay in the database, unread.
+_CONTEXT_KINDS = (
+    MemoryKind.DIETARY_CONSTRAINT,
+    MemoryKind.NUTRITION_TARGET,
+    MemoryKind.NAMED_ROUTINE,
+)
 
 
 class AgentState(TypedDict):
@@ -49,6 +80,7 @@ class AgentState(TypedDict):
     event_id: NotRequired[str | None]
     today: NotRequired[date]
     recent_meals: NotRequired[list[MealRecord]]
+    memories: NotRequired[list[MemoryRecord]]
     parsed: NotRequired[ParsedMessage]
     resolution: NotRequired[Resolution]
     reference_from_window: NotRequired[bool]
@@ -80,6 +112,7 @@ class MealAgent:
         builder.add_node("delete_meal", self._delete_meal)
         builder.add_node("get_totals", self._get_totals)
         builder.add_node("list_meals", self._list_meals)
+        builder.add_node("save_memory", self._save_memory)
         builder.add_node("respond", self._respond)
 
         builder.add_edge(START, "gather_context")
@@ -95,6 +128,7 @@ class MealAgent:
                 AgentIntent.DELETE_MEAL.value: "delete_meal",
                 AgentIntent.GET_TOTALS.value: "get_totals",
                 AgentIntent.LIST_MEALS.value: "list_meals",
+                AgentIntent.SAVE_MEMORY.value: "save_memory",
                 "respond": "respond",
             },
         )
@@ -105,6 +139,7 @@ class MealAgent:
             "delete_meal",
             "get_totals",
             "list_meals",
+            "save_memory",
             "respond",
         ):
             builder.add_edge(node, END)
@@ -154,6 +189,9 @@ class MealAgent:
     def _replay(self, event_id: str, cached: str | None) -> str:
         if cached is not None:
             return cached
+        remembered = self.tools.memory_for_event(event_id)
+        if remembered is not None:
+            return responses.remembered(remembered.content)
         outcome = self.tools.outcome_for_event(event_id)
         if outcome is None:
             return "I already received that message and am still working on it."
@@ -193,7 +231,12 @@ class MealAgent:
                 timezone=state["timezone"],
             )
         )
-        return {"today": today, "recent_meals": meals}
+        memories = self.tools.list_memories(
+            ListMemoriesInput(
+                user_id=state["user_id"], kinds=_CONTEXT_KINDS, limit=MEMORY_CONTEXT_LIMIT
+            )
+        )
+        return {"today": today, "recent_meals": meals, "memories": memories}
 
     def _plan(self, state: AgentState) -> dict[str, ParsedMessage]:
         parsed = self.planner.parse(
@@ -202,6 +245,7 @@ class MealAgent:
                 occurred_at=state["now"],
                 timezone=state["timezone"],
                 recent_meals=tuple(state["recent_meals"]),
+                memories=tuple(state["memories"]),
             )
         )
         return {"parsed": parsed}
@@ -238,7 +282,7 @@ class MealAgent:
         parsed = state["parsed"]
         if parsed.intent in _NO_TOOL_CALLS:
             return "respond"
-        if parsed.intent in _REFERENCE_MUTATIONS:
+        if parsed.intent in _REFERENCE_MUTATIONS and parsed.reference is not None:
             resolution = state.get("resolution")
             if resolution is None or resolution.status is not ResolutionStatus.RESOLVED:
                 return "respond"
@@ -255,7 +299,11 @@ class MealAgent:
         meal = self.tools.log_meal(
             LogMealInput(user_id=state["user_id"], meal=draft, source_event_id=state["event_id"])
         )
-        return {"response": responses.logged(meal, decision, parsed.unrecognized)}
+        return {
+            "response": responses.logged(
+                meal, decision, _meal_notes(parsed.unrecognized, state["memories"], meal.items)
+            )
+        }
 
     def _repeat_meal(self, state: AgentState) -> dict[str, str]:
         source = self._resolved_meal(state)
@@ -295,7 +343,24 @@ class MealAgent:
         )
         if revised is None:
             return {"response": responses.not_found("that")}
-        return {"response": responses.revised(revised, parsed.unrecognized)}
+        notes = _meal_notes(parsed.unrecognized, state["memories"], revised.items)
+        return {"response": responses.revised(revised, notes)}
+
+    def _save_memory(self, state: AgentState) -> dict[str, str]:
+        parsed = state["parsed"]
+        content = parsed.memory
+        if content is None:  # pragma: no cover - enforced by ParsedMessage validation
+            raise ValueError("save_memory intent requires a memory")
+        if isinstance(content, NamedRoutine):
+            content = _routine_from(content, self._resolved_meal(state))
+        saved = self.tools.remember(
+            RememberInput(
+                user_id=state["user_id"],
+                memory=content,
+                source_event_id=state.get("event_id"),
+            )
+        )
+        return {"response": responses.remembered(saved.content)}
 
     def _delete_meal(self, state: AgentState) -> dict[str, str]:
         meal = self._resolved_meal(state)
@@ -313,7 +378,13 @@ class MealAgent:
         totals = self.tools.get_daily_totals(
             GetDailyTotalsInput(user_id=state["user_id"], day=day, timezone=state["timezone"])
         )
-        return {"response": responses.totals(totals, responses.day_label(day, state["today"]))}
+        return {
+            "response": responses.totals(
+                totals,
+                responses.day_label(day, state["today"]),
+                targets(state["memories"]),
+            )
+        }
 
     def _list_meals(self, state: AgentState) -> dict[str, str]:
         day = _target_day(state)
@@ -335,8 +406,10 @@ class MealAgent:
                 return {"response": responses.no_reference_match(resolution.candidates)}
             label = responses.day_label(_target_day(state), state["today"])
             if resolution.status is ResolutionStatus.AMBIGUOUS and resolution.candidates:
-                action = "deletion" if parsed.intent is AgentIntent.DELETE_MEAL else "correction"
-                return {"response": responses.ambiguous(resolution.candidates, label, action)}
+                verb = _REFERENCE_VERBS[parsed.intent]
+                return {"response": responses.ambiguous(resolution.candidates, label, verb)}
+            if parsed.intent is AgentIntent.SAVE_MEMORY:
+                return {"response": responses.nothing_to_remember(label)}
             return {"response": responses.not_found(label)}
         return {
             "response": parsed.question
@@ -386,3 +459,22 @@ def _clarify(items: Sequence[MealItemDraft], policy: AmbiguityPolicy) -> str:
         f"I am not confident enough about the {names} portion to log a number. "
         "Roughly how much did you have?"
     )
+
+
+def _meal_notes(
+    unrecognized: Sequence[str], memories: Sequence[MemoryRecord], items: Sequence[MealItemDraft]
+) -> list[str]:
+    """What a written meal should be answered with beyond its own numbers."""
+    notes = [responses.omission(unrecognized)]
+    conflicts = conflicting_foods(memories, items)
+    diet = current_diet(memories)
+    if conflicts and diet is not None:
+        notes.append(responses.diet_conflict(diet, conflicts))
+    return [note for note in notes if note]
+
+
+def _routine_from(routine: NamedRoutine, meal: MealRecord) -> NamedRoutine:
+    slot = routine.slot
+    if slot == DEFAULT_ROUTINE_SLOT and meal.meal_type is not MealType.UNSPECIFIED:
+        slot = meal.meal_type.value
+    return NamedRoutine(slot=slot, items=meal.items, confidence=routine.confidence)

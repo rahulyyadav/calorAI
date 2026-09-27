@@ -8,14 +8,30 @@ from decimal import Decimal, InvalidOperation
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
+from pydantic import ValidationError
+
 from calorai_agent.domain import (
     AgentIntent,
+    DietaryConstraint,
+    InterpretationOrigin,
     MealDraft,
     MealItemDraft,
     MealRecord,
     MealReference,
     MealType,
+    MemoryRecord,
+    NamedRoutine,
+    NutritionTarget,
     ParsedMessage,
+)
+from calorai_agent.memory import (
+    DEFAULT_ROUTINE_SLOT,
+    DIET_ALIASES,
+    METRIC_WORDS,
+    normalized_diet,
+    routine_for,
+    routine_meal_type,
+    routines,
 )
 from calorai_agent.nutrition import ALIASES, FOODS
 from calorai_agent.policy import MAX_PLAUSIBLE_QUANTITY, UNUSABLE_QUANTITY_CONFIDENCE
@@ -168,6 +184,53 @@ ADDITIVE_WORDS = ("also", "plus", "extra", "with", "too", "another", "on the sid
 
 REPEAT_WORDS = ("same as", "same for", "same thing", "what i had", "repeat", "usual", "again")
 
+# A memory statement is its own turn: the agent records the fact and answers that, rather
+# than logging food and updating a preference in the same breath.
+_DIET_PHRASES = "|".join(
+    re.escape(phrase) for phrase in sorted(DIET_ALIASES, key=len, reverse=True)
+)
+_DIET_STATEMENT = re.compile(
+    r"\b(?:i(?:'?m|\s+am)|my\s+diet\s+is)\s+(?:an?\s+)?(?P<diet>" + _DIET_PHRASES + r")\b",
+    re.IGNORECASE,
+)
+
+_TARGET_CUES = (
+    "target",
+    "goal",
+    "aim",
+    "trying",
+    "try to",
+    "shoot for",
+    "plan to",
+    "limit",
+    "max",
+    "i want",
+    "i need",
+)
+
+_METRIC_NAMES = "|".join(re.escape(word) for word in sorted(METRIC_WORDS, key=len, reverse=True))
+
+# Both orders people state a target in: "120g protein" and "protein of 120g".
+_METRIC_THEN_AMOUNT = re.compile(
+    r"\b(?P<metric>" + _METRIC_NAMES + r")\s*(?:target|goal|aim)?\s*(?:of|is|to|:)?\s*"
+    r"(?P<amount>\d+(?:\.\d+)?)\s*(?:g|grams?|gm|kcal)?\b",
+    re.IGNORECASE,
+)
+_AMOUNT_THEN_METRIC = re.compile(
+    r"\b(?P<amount>\d+(?:\.\d+)?)\s*(?:g|grams?|gm)?\s*(?:of\s+)?"
+    r"(?P<metric>" + _METRIC_NAMES + r")\b",
+    re.IGNORECASE,
+)
+
+_ROUTINE_SAVE_CUE = re.compile(
+    r"\b(?:remember|save|note|set|make|call)\b|\b(?:this|that)\s+(?:is|was)\b",
+    re.IGNORECASE,
+)
+_USUAL_PHRASE = re.compile(
+    r"\b(?:my|the)\s+(?:usual|regular|normal|daily|default|go-?to)\b",
+    re.IGNORECASE,
+)
+
 TOTALS_PHRASES = (
     "how am i doing",
     "totals",
@@ -178,6 +241,8 @@ TOTALS_PHRASES = (
     "calories today",
     "protein today",
     "macros",
+    "target",
+    "goal",
 )
 
 # Amount words deliberately left unresolved, so the agent asks instead of inventing a number.
@@ -251,6 +316,7 @@ class PlannerRequest:
     occurred_at: datetime
     timezone: str = "UTC"
     recent_meals: Sequence[MealRecord] = ()
+    memories: Sequence[MemoryRecord] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -306,6 +372,9 @@ class RuleBasedPlanner:
                     "i eaten today'."
                 ),
             )
+        remembered = self._stated_memory(text)
+        if remembered is not None:
+            return remembered
         if self._is_totals_question(text):
             return ParsedMessage(intent=AgentIntent.GET_TOTALS, reference=_reference(text))
         if self._is_list_question(text):
@@ -337,7 +406,7 @@ class RuleBasedPlanner:
                 intent=AgentIntent.LOG_MEAL, draft=self._draft(request, text, items)
             )
         if _contains(text, REPEAT_WORDS):
-            return self._repeat(text)
+            return self._repeat(request, text)
         return self._without_items(text)
 
     @staticmethod
@@ -352,14 +421,38 @@ class RuleBasedPlanner:
         )
 
     @staticmethod
-    def _repeat(text: str) -> ParsedMessage:
-        if "usual" in text:
+    def _stated_memory(text: str) -> ParsedMessage | None:
+        """A message whose whole point is a durable fact the agent should keep."""
+        diet = _DIET_STATEMENT.search(text)
+        if diet is not None:
+            return ParsedMessage(
+                intent=AgentIntent.SAVE_MEMORY,
+                memory=DietaryConstraint(diet=normalized_diet(diet.group("diet"))),
+            )
+        target = _nutrition_target(text)
+        if target is not None:
+            return ParsedMessage(intent=AgentIntent.SAVE_MEMORY, memory=target)
+        if _ROUTINE_SAVE_CUE.search(text) and _USUAL_PHRASE.search(text):
+            slot = _type_hint(text)
+            return ParsedMessage(
+                intent=AgentIntent.SAVE_MEMORY,
+                memory=NamedRoutine(slot=slot.value if slot else DEFAULT_ROUTINE_SLOT),
+                reference=_reference(text),
+            )
+        return None
+
+    @staticmethod
+    def _repeat(request: PlannerRequest, text: str) -> ParsedMessage:
+        if _USUAL_PHRASE.search(text) is not None:
+            meal_type = _type_hint(text)
+            routine = routine_for(request.memories, meal_type)
+            if routine is not None:
+                return ParsedMessage(
+                    intent=AgentIntent.LOG_MEAL, draft=_routine_draft(request, routine)
+                )
             return ParsedMessage(
                 intent=AgentIntent.CLARIFY,
-                question=(
-                    "What is your usual? Log it once and say 'remember this as my usual' "
-                    "and I will reuse it later."
-                ),
+                question=_no_routine_question(request.memories, meal_type),
             )
         # "same as yesterday for dinner" names the *target* slot for the copy, so it
         # must not filter the meal being copied.
@@ -509,6 +602,61 @@ def _revision_reference(
 def _meal_lists(meal: MealRecord, food_name: str) -> bool:
     hint = food_name.lower()
     return any(hint in item.name.lower() for item in meal.items)
+
+
+def _nutrition_target(text: str) -> NutritionTarget | None:
+    """A stated daily target, in either "120g protein" or "protein of 120g" order.
+
+    Only an explicit aim counts: a plain "30g protein" inside a meal description is a
+    portion being logged, not a goal being set.
+    """
+    if not _contains(text, _TARGET_CUES):
+        return None
+    for pattern in (_AMOUNT_THEN_METRIC, _METRIC_THEN_AMOUNT):
+        match = pattern.search(text)
+        if match is None:
+            continue
+        try:
+            return NutritionTarget(
+                metric=METRIC_WORDS[match.group("metric").lower()],
+                value=Decimal(match.group("amount")),
+            )
+        except ValidationError:
+            return None
+    return None
+
+
+def _routine_draft(request: PlannerRequest, routine: NamedRoutine) -> MealDraft:
+    meal_type = routine_meal_type(routine)
+    return MealDraft(
+        meal_type=meal_type,
+        occurred_at=local_time(request, 0, meal_type),
+        source_text=request.text,
+        items=routine.items,
+        notes=f"Copied from your saved routine: {routine.slot}.",
+        origin=InterpretationOrigin.USER_CONFIRMED,
+    )
+
+
+def _no_routine_question(memories: Sequence[MemoryRecord], meal_type: MealType | None) -> str:
+    """Ask once to establish a routine, instead of inventing what 'usual' means."""
+    saved = routines(memories)
+    slot = (
+        meal_type.value if meal_type is not None and meal_type is not MealType.UNSPECIFIED else None
+    )
+    if not saved:
+        named = f" {slot}" if slot else ""
+        return (
+            f"What is your usual{named}? Log it once and say "
+            "'remember this as my usual' and I will reuse it later."
+        )
+    if slot is None:
+        saved_slots = ", ".join(routine.slot for routine in saved)
+        return f"Which one is your usual today — {saved_slots}?"
+    return (
+        f"I don't have your usual {slot} saved yet. Log a {slot} and say "
+        f"'remember this as my usual {slot}' and I will reuse it later."
+    )
 
 
 def _replaces_the_meal(

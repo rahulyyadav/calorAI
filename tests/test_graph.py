@@ -218,7 +218,7 @@ def test_an_ambiguous_deletion_asks_which_meal_to_remove(agent: MealAgent, clock
 
     response = _send(agent, clock, "delete that", 21)
 
-    assert "deletion" in response
+    assert "delete" in response
     assert "lunch" in response and "dinner" in response
     assert _send(agent, clock, "calories today?", 22).endswith("across 2 meals.")
 

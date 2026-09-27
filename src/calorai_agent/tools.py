@@ -12,7 +12,11 @@ from calorai_agent.domain import (
     MealItemDraft,
     MealOutcome,
     MealRecord,
+    MemoryContent,
+    MemoryKind,
+    MemoryRecord,
 )
+from calorai_agent.memory import MEMORY_CONTEXT_LIMIT
 from calorai_agent.repository import MealRepository
 
 
@@ -59,6 +63,18 @@ class RecordInboundInput(BaseModel):
     channel: str = Field(min_length=1)
 
 
+class RememberInput(BaseModel):
+    user_id: str = Field(min_length=1)
+    memory: MemoryContent
+    source_event_id: str | None = None
+
+
+class ListMemoriesInput(BaseModel):
+    user_id: str = Field(min_length=1)
+    kinds: tuple[MemoryKind, ...] = ()
+    limit: int = Field(default=MEMORY_CONTEXT_LIMIT, ge=1, le=50)
+
+
 class MealTools:
     """Small application-level tool surface; models never receive database access."""
 
@@ -92,6 +108,12 @@ class MealTools:
     def get_daily_totals(self, query: GetDailyTotalsInput) -> DailyTotals:
         return self.repository.totals_for_day(query.user_id, query.day, query.timezone)
 
+    def remember(self, command: RememberInput) -> MemoryRecord:
+        return self.repository.remember(command.user_id, command.memory, command.source_event_id)
+
+    def list_memories(self, query: ListMemoriesInput) -> list[MemoryRecord]:
+        return self.repository.active_memories(query.user_id, query.kinds, query.limit)
+
     def record_inbound(self, command: RecordInboundInput) -> InboundEvent:
         return self.repository.record_inbound(
             command.user_id, command.external_id, command.channel, command.text
@@ -102,3 +124,6 @@ class MealTools:
 
     def outcome_for_event(self, event_id: str) -> MealOutcome | None:
         return self.repository.outcome_for_event(event_id)
+
+    def memory_for_event(self, event_id: str) -> MemoryRecord | None:
+        return self.repository.memory_for_event(event_id)

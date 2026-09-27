@@ -4,7 +4,16 @@ from collections.abc import Sequence
 from datetime import date
 from decimal import Decimal
 
-from calorai_agent.domain import DailyTotals, MealItemDraft, MealRecord, MealType
+from calorai_agent.domain import (
+    DailyTotals,
+    MealItemDraft,
+    MealRecord,
+    MealType,
+    MemoryContent,
+    Nutrition,
+    NutritionTarget,
+)
+from calorai_agent.memory import describe, metric_value, target_phrase
 from calorai_agent.policy import LogDecision
 
 
@@ -25,27 +34,31 @@ def item_summary(meal: MealRecord) -> str:
     return ", ".join(item_line(item) for item in meal.items)
 
 
-def logged(meal: MealRecord, decision: LogDecision, unrecognized: Sequence[str] = ()) -> str:
+def logged(meal: MealRecord, decision: LogDecision, notes: Sequence[str] = ()) -> str:
     nutrition = meal.nutrition
     if decision is LogDecision.LOG_AS_ESTIMATE:
         return (
             f"Logged about {item_summary(meal)} — roughly {nutrition.calories:.0f} kcal and "
             f"{nutrition.protein_g:.0f}g protein. That is an estimate; correct me if the "
-            f"portion was different.{omission(unrecognized)}"
+            f"portion was different.{_notes(notes)}"
         )
     return (
         f"Logged {item_summary(meal)} — about {nutrition.calories:.0f} kcal and "
-        f"{nutrition.protein_g:.0f}g protein.{omission(unrecognized)}"
+        f"{nutrition.protein_g:.0f}g protein.{_notes(notes)}"
     )
 
 
-def revised(meal: MealRecord, unrecognized: Sequence[str] = ()) -> str:
+def revised(meal: MealRecord, notes: Sequence[str] = ()) -> str:
     nutrition = meal.nutrition
     return (
         f"Updated your {_meal_label(meal)} to {item_summary(meal)} — now about "
         f"{nutrition.calories:.0f} kcal and {nutrition.protein_g:.0f}g "
-        f"protein.{omission(unrecognized)}"
+        f"protein.{_notes(notes)}"
     )
+
+
+def _notes(notes: Sequence[str]) -> str:
+    return "".join(f" {note}" for note in notes if note)
 
 
 def omission(unrecognized: Sequence[str]) -> str:
@@ -53,7 +66,26 @@ def omission(unrecognized: Sequence[str]) -> str:
     if not unrecognized:
         return ""
     named = ", ".join(unrecognized[:3])
-    return f" I don't have reference data for {named}, so it isn't counted."
+    counted = "it is" if len(unrecognized) == 1 else "they are"
+    return f"I have no reference data for {named}, so {counted} not counted."
+
+
+def diet_conflict(diet: str, foods: Sequence[str]) -> str:
+    if not foods:
+        return ""
+    named = ", ".join(foods[:3])
+    return f"Heads up — {named} is not {diet}. Tell me if that has changed."
+
+
+def remembered(content: MemoryContent) -> str:
+    return f"Got it — I will remember {describe(content)}."
+
+
+def nothing_to_remember(label: str) -> str:
+    return (
+        f"I couldn't find a logged meal {label.lower()} to remember. "
+        "Log it first, then ask me to keep it as your usual."
+    )
 
 
 def deleted(meal: MealRecord) -> str:
@@ -69,15 +101,27 @@ def repeated(source: MealRecord, copy: MealRecord, day_label: str) -> str:
     )
 
 
-def totals(day: DailyTotals, label: str) -> str:
+def totals(day: DailyTotals, label: str, targets: Sequence[NutritionTarget] = ()) -> str:
     nutrition = day.nutrition
+    progress = target_progress(nutrition, targets)
     if day.meal_count == 0:
-        return f"Nothing logged {label.lower()} yet."
+        return f"Nothing logged {label.lower()} yet.{progress}"
     return (
         f"{label}: {nutrition.calories:.0f} kcal, {nutrition.protein_g:.0f}g protein, "
         f"{nutrition.carbs_g:.0f}g carbs, and {nutrition.fat_g:.0f}g fat "
-        f"across {day.meal_count} {_plural(day.meal_count, 'meal')}."
+        f"across {day.meal_count} {_plural(day.meal_count, 'meal')}.{progress}"
     )
+
+
+def target_progress(nutrition: Nutrition, targets: Sequence[NutritionTarget]) -> str:
+    """Where the day stands against the targets the user set, when they set any."""
+    if not targets:
+        return ""
+    standing = ", ".join(
+        f"{metric_value(nutrition, target.metric):.0f} of {target_phrase(target)}"
+        for target in targets
+    )
+    return f" Against your targets: {standing}."
 
 
 def meal_list(meals: Sequence[MealRecord], label: str) -> str:
@@ -87,9 +131,9 @@ def meal_list(meals: Sequence[MealRecord], label: str) -> str:
     return f"{label} you logged: {described}."
 
 
-def ambiguous(candidates: Sequence[MealRecord], label: str, action: str = "correct") -> str:
+def ambiguous(candidates: Sequence[MealRecord], label: str, verb: str = "correct") -> str:
     described = " or ".join(_meal_label(meal) for meal in candidates[:3])
-    return f"Which {label.lower()} meal do you mean for this {action} — {described}?"
+    return f"Which {label.lower()} meal do you mean to {verb} — {described}?"
 
 
 def not_found(label: str) -> str:

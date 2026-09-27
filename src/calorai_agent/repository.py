@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from uuid import uuid4
 from zoneinfo import ZoneInfo
+
+from pydantic import TypeAdapter
 
 from calorai_agent.db import Database
 from calorai_agent.domain import (
@@ -16,9 +19,17 @@ from calorai_agent.domain import (
     MealOutcome,
     MealRecord,
     MealType,
+    MemoryContent,
+    MemoryKind,
+    MemoryRecord,
     MutationKind,
+    NamedRoutine,
     Nutrition,
+    memory_key,
 )
+from calorai_agent.memory import MEMORY_CONTEXT_LIMIT
+
+_MEMORY_ADAPTER: TypeAdapter[MemoryContent] = TypeAdapter(MemoryContent)
 
 
 def _now() -> datetime:
@@ -26,7 +37,7 @@ def _now() -> datetime:
 
 
 class MealRepository:
-    """SQLite persistence for meals, immutable revisions, and inbound-event idempotency."""
+    """SQLite persistence for meals, memories, immutable revisions, and event idempotency."""
 
     def __init__(self, database: Database) -> None:
         self.database = database
@@ -264,6 +275,105 @@ class MealRepository:
                 "UPDATE inbound_events SET response_text = ?, completed_at = ? WHERE id = ?",
                 (response_text, _now().isoformat(), event_id),
             )
+
+    def remember(
+        self,
+        user_id: str,
+        content: MemoryContent,
+        source_event_id: str | None = None,
+    ) -> MemoryRecord:
+        """Store a stated fact, retiring the active fact it replaces in the same transaction.
+
+        Contradictions never accumulate: one slot holds one active memory, and the
+        superseded row stays behind as the provenance of a changed mind.
+        """
+        if isinstance(content, NamedRoutine) and not content.items:
+            raise ValueError("a named routine needs at least one food")
+        created_at = _now()
+        with self.database.write_transaction() as connection:
+            connection.execute(
+                """
+                UPDATE memories SET superseded_at = ?
+                WHERE user_id = ? AND memory_type = ? AND key = ? AND superseded_at IS NULL
+                """,
+                (
+                    created_at.isoformat(),
+                    user_id,
+                    content.kind.value,
+                    memory_key(content),
+                ),
+            )
+            memory_id = str(uuid4())
+            connection.execute(
+                """
+                INSERT INTO memories(
+                    id, user_id, memory_type, key, value_json, confidence,
+                    source_event_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    memory_id,
+                    user_id,
+                    content.kind.value,
+                    memory_key(content),
+                    content.model_dump_json(),
+                    content.confidence,
+                    source_event_id,
+                    created_at.isoformat(),
+                ),
+            )
+        return MemoryRecord(
+            id=memory_id,
+            user_id=user_id,
+            content=content,
+            source_event_id=source_event_id,
+            created_at=created_at,
+        )
+
+    def memory_for_event(self, event_id: str) -> MemoryRecord | None:
+        """The memory an inbound message committed, so a redelivery can be answered."""
+        with self.database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, user_id, value_json, source_event_id, created_at
+                FROM memories WHERE source_event_id = ?
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (event_id,),
+            ).fetchone()
+        return None if row is None else self._memory_from_row(row)
+
+    def active_memories(
+        self,
+        user_id: str,
+        kinds: Sequence[MemoryKind] = (),
+        limit: int = MEMORY_CONTEXT_LIMIT,
+    ) -> list[MemoryRecord]:
+        """The facts still standing for a user, newest first and capped."""
+        kinds_filter = f"AND memory_type IN ({', '.join('?' for _ in kinds)})" if kinds else ""
+        query = f"""
+            SELECT id, user_id, value_json, source_event_id, created_at
+            FROM memories
+            WHERE user_id = ? AND superseded_at IS NULL
+            {kinds_filter}
+            ORDER BY created_at DESC
+            LIMIT ?
+        """
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                query, (user_id, *(kind.value for kind in kinds), limit)
+            ).fetchall()
+        return [self._memory_from_row(row) for row in rows]
+
+    @staticmethod
+    def _memory_from_row(row: sqlite3.Row) -> MemoryRecord:
+        return MemoryRecord(
+            id=row["id"],
+            user_id=row["user_id"],
+            content=_MEMORY_ADAPTER.validate_json(row["value_json"]),
+            source_event_id=row["source_event_id"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
 
     def _list_between(self, user_id: str, start: datetime, end: datetime) -> list[MealRecord]:
         with self.database.connect() as connection:

@@ -9,7 +9,7 @@ This repository deliberately separates the **agent core** from its delivery chan
 
 ## Current status
 
-Phases 0 to 2 are complete. The repository contains a locally runnable LangGraph vertical slice with SQLite persistence, deterministic nutrition reference data, typed meal tools, timezone-correct daily totals, and a CLI. Corrections are written as immutable meal revisions inside one transaction, ambiguous requests ask one focused question instead of guessing, refusals and impossible portions never reach a persisted row, and retried inbound messages are answered from an exactly-once event ledger. A text-model planner implements the same interface as the deterministic one and falls back to it on any unusable output, so the slice still runs without API keys. Persistent memory, vision, and WhatsApp arrive in subsequent phases and are not claimed as implemented yet.
+Phases 0 to 3 are complete. The repository contains a locally runnable LangGraph vertical slice with SQLite persistence, deterministic nutrition reference data, typed meal tools, timezone-correct daily totals, and a CLI. Corrections are written as immutable meal revisions inside one transaction, ambiguous requests ask one focused question instead of guessing, refusals and impossible portions never reach a persisted row, and retried inbound messages are answered from an exactly-once event ledger. A text-model planner implements the same interface as the deterministic one and falls back to it on any unusable output, so the slice still runs without API keys. Memory survives a restart as typed records with confidence and provenance: a stated diet shapes later log replies, a protein or calorie target turns totals into progress, and `my usual` replays a saved routine as a new meal. A changed fact supersedes the one it replaces instead of contradicting it, and retrieval is capped and filtered by kind before it reaches a prompt. Vision and WhatsApp arrive in subsequent phases and are not claimed as implemented yet.
 
 Start with:
 
@@ -56,11 +56,18 @@ Try:
 
 ```text
 had 2 parathas and chai for breakfast
+remember this as my usual breakfast
+i'm vegetarian btw
+aim for 120g protein a day
 how am I doing today?
 what did I eat today?
 actually that was 3 parathas
 no eggs
+my usual
 ```
+
+Each `calorai` invocation is a fresh process, so `my usual` and the stated target keep working after
+you close and reopen the CLI.
 
 Run the verification suite:
 

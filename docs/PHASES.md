@@ -58,7 +58,7 @@ still resolves shortly after midnight but reaches back no further than last nigh
 never silently rewrite days-old history, while an explicitly dated pointer does not leak
 across days at all.
 
-## Phase 3 - Selective persistent memory
+## Phase 3 - Selective persistent memory (complete)
 
 **Outcome:** cross-session memory affects behavior without bloating prompts.
 
@@ -69,6 +69,26 @@ across days at all.
 - Make `my usual` and user targets work after a fresh process start.
 
 **Evidence:** restart process, then demonstrate vegetarian preference, protein target, and usual breakfast retrieval.
+
+Implemented evidence: 157 tests pass at 96% package coverage with ruff and strict mypy clean, and
+the exit evidence is demonstrated in two separate CLI processes: `2 idlis and coffee for breakfast`
+then `remember this as my usual breakfast`, `i'm vegetarian btw`, `aim for 120g protein a day` in
+the first, and `my usual breakfast`, `1 chicken and 2 idlis`, `how am I doing today?` in the second,
+which logs the saved routine from the database, notes that chicken is not vegetarian, and reports
+`44 of 120 g protein` against the stored target. Memory is three typed records, not a free-text
+scratch pad: `DietaryConstraint`, `NutritionTarget` (keyed per nutrient, bounds-checked so a
+`900000 g protein` target never lands), and `NamedRoutine` (refused without foods). Each carries the
+confidence it was stated at and the `source_event_id` that stated it, so a redelivered or
+crash-windowed memory message is answered from the database instead of writing twice. A new fact
+replaces the active fact in its slot in the same transaction (`memory_key` gives one `diet` slot, so
+a changed mind supersedes rather than contradicts; `active_memories` reads only the live rows, newest
+first, capped at 8 and filtered by the kinds an intent actually consumes). Retrieval is bounded twice
+over — by kind and by limit — before it reaches either planner prompt. Memory changes behavior, not
+just context: a diet names the logged foods it rules out and says so once per reply, a target turns
+totals into progress, and `my usual` becomes a `LOG_MEAL` draft marked user-confirmed. An ambiguous
+routine is never guessed — an unlabeled save asks which meal to remember, `my usual lunch` with only
+a breakfast saved says which slot is missing, and two saved routines with no meal type asks instead
+of inventing a number.
 
 ## Phase 4 - Separate vision path and multimodal fusion
 

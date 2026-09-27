@@ -7,14 +7,20 @@ from pydantic import BaseModel, Field, ValidationError
 
 from calorai_agent.domain import (
     AgentIntent,
+    DietaryConstraint,
     InterpretationOrigin,
     MealDraft,
     MealItemDraft,
     MealRecord,
     MealReference,
     MealType,
+    MemoryContent,
+    NamedRoutine,
+    NutrientMetric,
+    NutritionTarget,
     ParsedMessage,
 )
+from calorai_agent.memory import context_lines, normalized_diet
 from calorai_agent.nutrition import FOODS, lookup
 from calorai_agent.planning import PlannerRequest, RuleBasedPlanner, local_time
 from calorai_agent.policy import MAX_PLAUSIBLE_QUANTITY, UNUSABLE_QUANTITY_CONFIDENCE
@@ -26,7 +32,7 @@ SYSTEM_PROMPT = """You interpret meal-logging messages for a nutrition assistant
 
 Return ONE JSON object with these fields:
 - intent: "log_meal" | "revise_meal" | "delete_meal" | "repeat_meal" | "get_totals"
-  | "list_meals" | "acknowledge" | "clarify" | "unknown"
+  | "list_meals" | "save_memory" | "acknowledge" | "clarify" | "unknown"
 - items: array of {{"name", "quantity", "confidence"}} for the foods being logged or corrected.
   Use ONLY these food names: {foods}. Quantity is a decimal number of units.
 - meal_type: "breakfast" | "lunch" | "dinner" | "snack" | "unspecified"
@@ -37,6 +43,10 @@ Return ONE JSON object with these fields:
   a food, otherwise null.
 - replace_items: boolean, true only when the message restates the entire corrected meal
   rather than fixing one line of it.
+- memory: only for intent "save_memory", one of {{"diet": "vegetarian"}},
+  {{"metric": "calories|protein_g|carbs_g|fat_g", "value": 1800}}, or
+  {{"slot": "breakfast|lunch|dinner|snack|default"}} to remember a logged meal as a routine.
+  A routine must also carry a reference to the meal it remembers.
 - question: string when intent is "clarify"; otherwise null.
 - statement: string when intent is "acknowledge" (for example, the user skipped a meal).
   Otherwise null.
@@ -45,6 +55,8 @@ Rules:
 - You never estimate calories, protein, carbs, or fat. The application computes those.
 - Never invent a meal the user did not describe. "skipped lunch" is an acknowledge.
 - Vague descriptions such as "grazed all afternoon" need exactly one clarifying question.
+- A durable fact the user states about themselves (a diet, a daily target, a routine) is
+  "save_memory", not a meal to log.
 - Confidence is your certainty about the food identity and quantity, from 0 to 1.
 - A message is one meal at most.
 - If the message mentions a food outside that list, name it anyway; the application
@@ -65,6 +77,14 @@ class ModelReference(BaseModel):
     food_hint: str | None = None
 
 
+class ModelMemory(BaseModel):
+    diet: str | None = None
+    metric: NutrientMetric | None = None
+    value: Decimal | None = None
+    slot: str | None = None
+    confidence: float = Field(default=1.0, ge=0, le=1)
+
+
 class ModelDecision(BaseModel):
     intent: AgentIntent
     items: tuple[ModelFoodItem, ...] = ()
@@ -72,6 +92,7 @@ class ModelDecision(BaseModel):
     day_offset: int = 0
     reference: ModelReference | None = None
     replace_items: bool = False
+    memory: ModelMemory | None = None
     question: str | None = None
     statement: str | None = None
 
@@ -159,6 +180,12 @@ class ModelPlanner:
                 intent=decision.intent,
                 reference=MealReference(day_offset=decision.day_offset),
             )
+        if decision.intent is AgentIntent.SAVE_MEMORY:
+            return ParsedMessage(
+                intent=AgentIntent.SAVE_MEMORY,
+                memory=_build_memory(decision.memory),
+                reference=reference,
+            )
         if decision.intent is AgentIntent.CLARIFY:
             return ParsedMessage(
                 intent=AgentIntent.CLARIFY,
@@ -239,11 +266,28 @@ def _build_items(
     return list(merged.values()), tuple(unknown)
 
 
+def _build_memory(memory: ModelMemory | None) -> MemoryContent:
+    if memory is None:
+        raise ValueError("save_memory decision named no fact")
+    if memory.diet:
+        return DietaryConstraint(diet=normalized_diet(memory.diet), confidence=memory.confidence)
+    if memory.metric is not None and memory.value is not None:
+        return NutritionTarget(
+            metric=memory.metric, value=memory.value, confidence=memory.confidence
+        )
+    if memory.slot:
+        return NamedRoutine(slot=memory.slot, confidence=memory.confidence)
+    raise ValueError("save_memory decision named no fact")
+
+
 def _render_user_prompt(request: PlannerRequest) -> str:
     lines = [f"Current time: {request.occurred_at.isoformat()}", f"Timezone: {request.timezone}"]
     if request.recent_meals:
         lines.append("Recent meals:")
         lines.extend(f"- {_describe(meal)}" for meal in request.recent_meals[-8:])
+    if request.memories:
+        lines.append("What the user asked us to remember:")
+        lines.extend(context_lines(request.memories))
     lines.append(f"Message: {request.text}")
     return "\n".join(lines)
 

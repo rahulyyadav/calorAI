@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -110,9 +111,82 @@ class AgentIntent(StrEnum):
     DELETE_MEAL = "delete_meal"
     GET_TOTALS = "get_totals"
     LIST_MEALS = "list_meals"
+    SAVE_MEMORY = "save_memory"
     ACKNOWLEDGE = "acknowledge"
     CLARIFY = "clarify"
     UNKNOWN = "unknown"
+
+
+class MemoryKind(StrEnum):
+    DIETARY_CONSTRAINT = "dietary_constraint"
+    NUTRITION_TARGET = "nutrition_target"
+    NAMED_ROUTINE = "named_routine"
+
+
+class NutrientMetric(StrEnum):
+    CALORIES = "calories"
+    PROTEIN_G = "protein_g"
+    CARBS_G = "carbs_g"
+    FAT_G = "fat_g"
+
+
+class MemoryFact(BaseModel):
+    """One durable fact, kept with the certainty the user stated it at."""
+
+    model_config = ConfigDict(frozen=True)
+
+    confidence: float = Field(default=1.0, ge=0, le=1)
+
+
+class DietaryConstraint(MemoryFact):
+    kind: Literal[MemoryKind.DIETARY_CONSTRAINT] = MemoryKind.DIETARY_CONSTRAINT
+    diet: str = Field(min_length=1, max_length=60)
+
+
+class NutritionTarget(MemoryFact):
+    kind: Literal[MemoryKind.NUTRITION_TARGET] = MemoryKind.NUTRITION_TARGET
+    metric: NutrientMetric
+    value: Decimal = Field(gt=0, le=20000)
+
+
+class NamedRoutine(MemoryFact):
+    kind: Literal[MemoryKind.NAMED_ROUTINE] = MemoryKind.NAMED_ROUTINE
+    slot: str = Field(min_length=1, max_length=40)
+    items: tuple[MealItemDraft, ...] = ()
+
+
+MemoryContent = Annotated[
+    DietaryConstraint | NutritionTarget | NamedRoutine,
+    Field(discriminator="kind"),
+]
+
+
+DIET_KEY = "diet"
+
+
+def memory_key(content: MemoryContent) -> str:
+    """The slot a new memory replaces, so a changed fact supersedes instead of contradicting.
+
+    A diet occupies one slot however it is worded, so becoming non-vegetarian retires the
+    vegetarian record. Targets key on the nutrient and routines on their name, letting
+    several of each stay active at once.
+    """
+    if isinstance(content, DietaryConstraint):
+        return DIET_KEY
+    if isinstance(content, NutritionTarget):
+        return content.metric.value
+    return content.slot
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryRecord:
+    """A persisted memory: the fact, and the inbound message that earned it."""
+
+    id: str
+    user_id: str
+    content: MemoryContent
+    source_event_id: str | None
+    created_at: datetime
 
 
 class MealReference(BaseModel):
@@ -141,6 +215,7 @@ class ParsedMessage(BaseModel):
     explanation: str | None = None
     replace_items: bool = False
     unrecognized: tuple[str, ...] = ()
+    memory: MemoryContent | None = None
 
     @model_validator(mode="after")
     def validate_payload(self) -> ParsedMessage:
@@ -153,6 +228,11 @@ class ParsedMessage(BaseModel):
                 raise ValueError(f"{self.intent.value} requires a meal reference")
             if self.intent is AgentIntent.REVISE_MEAL and not self.items:
                 raise ValueError("revise_meal requires replacement items")
+        if self.intent is AgentIntent.SAVE_MEMORY:
+            if self.memory is None:
+                raise ValueError("save_memory requires a memory")
+            if isinstance(self.memory, NamedRoutine) and self.reference is None:
+                raise ValueError("a named routine requires a meal reference")
         return self
 
 

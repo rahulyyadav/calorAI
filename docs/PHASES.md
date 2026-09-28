@@ -140,9 +140,9 @@ counted is still saved before the question is asked, and a food the caption ment
 place on the plate is named as not logged rather than dropped quietly. Every failure boundary
 answers honestly instead of guessing: no vision key configured, a file that is not
 a photo, an oversized attachment, a provider error, an empty plate, and a food the table cannot
-price (which is named, never invented). Two known boundaries: only a local CLI path is readable
-until Phase 5 supplies a WhatsApp media source, and a redelivered photo turn replays its logged
-numbers without the photo's reply notes, because those notes are conversation text and not
+price (which is named, never invented). Two known boundaries: a photo arrives either as a local CLI
+path or as a WhatsApp media id, and nothing else is read, and a redelivered photo turn replays its
+logged numbers without the photo's reply notes, because those notes are conversation text and not
 persisted state.
 
 ## Phase 5 - WhatsApp Cloud API integration (complete)
@@ -199,7 +199,7 @@ totals, photo-plus-caption through a public HTTPS tunnel) has not been run, sinc
 credentials the reviewer supplies; every claim above is exercised against a stand-in Graph API
 instead, with no key and no network.
 
-**Meta setup note:** a Meta developer app and business portfolio/WhatsApp Business Account are the important Cloud API resources. A Facebook Page may be useful for the broader business presence, but the architecture must not couple meal logging to a Page object. We will verify the exact dashboard flow against the account UI during this phase because Meta changes onboarding screens frequently.
+**Meta setup note:** a Meta developer app and business portfolio/WhatsApp Business Account are the important Cloud API resources. A Facebook Page may be useful for the broader business presence, but the architecture must not couple meal logging to a Page object, and it does not: nothing in the code reads a Page id. Meta changes the onboarding screens frequently, so the numbered steps in the README are written against the values the process needs (a phone number id, a token, an app secret, a verify token of our own choosing) rather than as a transcript of a dashboard that may have moved since.
 
 ## Phase 6 - Evals, latency, resilience, and observability (complete)
 
@@ -214,18 +214,21 @@ instead, with no key and no network.
 
 **Evidence:** reproducible benchmark command and machine-readable result file.
 
-Implemented evidence: 418 tests pass at 95% package coverage with strict mypy clean on 22 source
-files, ruff check and format clean, 16/16 photo scenarios and 26/26 conversation scenarios green —
+Implemented evidence: 425 tests pass at 95% package coverage with strict mypy clean on 22 source
+files, ruff check and format clean, 16/16 photo scenarios and 28/28 conversation scenarios green —
 all with no API key and no network, so a reviewer can reproduce every claim on a clean clone.
-`observability.py` gives each turn a trace id from a contextvar and emits four event types: `turn`
+`observability.py` gives each turn a trace id from a contextvar and emits nine named events: `turn`
 (channel, route, photo, redelivered, duration_ms), `model_request` (kind, model, failed,
-response_chars), `media_fetch`, and `message_answered`. Meal text and photo bytes are deliberately
-absent from every line: this is health data, and a log that quotes the plate is a leak that outlives
-the database. Logs render as text for the CLI or JSON for a collector, and LangSmith is asked for
+response_chars), `media_fetch`, `message_answered`, `media_prefetched`, `media_prefetch_failed`,
+`planner_fast_path`, `delivery_failed`, and `tracing_disabled`. Meal text and photo bytes are
+deliberately absent from every line: this is health data, and a log that quotes the plate is a leak
+that outlives the database. Sender ids appear only as a digest keyed on the app secret, so a number
+cannot be recovered from a log by guessing the ones it might have been. Logs render as text for the
+CLI or JSON for a collector, and LangSmith is asked for
 only when `CALORAI_TRACING` and a key are *both* present — enabling tracing without a key reports
 "untraced" instead of buffering spans to send somewhere later.
 `evals/conversation_scenarios.json` carries all eleven conversations from the brief verbatim plus
-fifteen adversarial cases, and `scripts/run_evals.py` grades each on the five dimensions the brief
+seventeen adversarial cases, and `scripts/run_evals.py` grades each on the five dimensions the brief
 asks about: tool choice, meal state, totals, clarification behavior, memory use, and single-meal
 multimodal fusion. Grading reads routes from the application's own trace, meals and totals from the
 repository, memory kinds from active records, and fusion from the vision client's call count — so a
@@ -241,13 +244,17 @@ during a contact-indexing burst is a different number), p50 and p95, how many mo
 billed, and a `model_backing` field naming that both models were stand-ins — a 5 ms figure without
 that label is misreadable as a provider result. The commit field says `-dirty` when the measured tree
 was not the commit it names.
-Measured on Apple Silicon/Darwin with 8 CPUs at load 2.33: text cold 4.69/6.22 ms, text warm
-5.01/5.49 ms, read cold 4.22/4.85 ms, read warm 4.18/4.82 ms, image cold 4.76/5.14 ms, image warm
-5.14/5.75 ms p50/p95, each with 0.0 model calls per turn, and the cold paths reporting database setup
-separately at 10.2-10.5 ms p50 rather than hidden inside a percentile. The same command run at load
-11.6 was about 1 ms slower at p50 with a 10.6 ms read p95, which is what the field is for. Warm
-running no faster than cold is the honest shape of a 5 ms measurement: SQLite page cache and allocator
-state dominate at this scale.
+Measured on Apple Silicon/Darwin with 8 CPUs at load 2.23, from the commit that carries this
+sentence: text cold 5.24/7.41 ms, text warm 5.04/6.40 ms, read cold 4.33/5.20 ms, read warm
+4.28/7.94 ms, image cold 4.91/6.27 ms, image warm 5.50/6.79 ms p50/p95, each with 0.0 model calls per
+turn, and the cold paths reporting database setup separately at 10.7-11.2 ms p50 rather than hidden
+inside a percentile. The load field exists because
+the same command on the same laptop measures a slower p95 when the machine is busy — compare
+`load_average_1m` before comparing two runs, which is the honest way to read a 5 ms number. Warm
+running no faster than cold is the honest shape of a 5 ms measurement: `text_warm` beat `text_cold`
+by 0.2 ms on this run while `image_warm` lost to `image_cold` by 0.59 ms, and `read_warm` holds both
+the best p50 and the worst p95 in the table. SQLite page cache and allocator state dominate at this
+scale.
 What keeps the numbers in milliseconds at all is the fast paths — `RuleBasedPlanner.deterministic_read`
 answers totals and "what did I eat" without a model call, which the artifact now proves by billing
 0.0 model requests per read turn instead of asserting it; the nutrition walk is a bounded
@@ -297,16 +304,35 @@ Trace ids now cross the parallel-fetch pool, `span()` cannot be crashed by a fie
 wrote into the dict it was handed, and text log values are quoted so a reason with spaces in it is
 still one field.
 
+Re-verifying the same phase found the mirror of its first bug rather than a new one. The guardrail
+that stopped a list question from swallowing a stated meal had made a yes/no question carrying an
+amount ("did i eat 2 parathas today?") log two parathas — inventing the meal the user was asking
+about, which is the same failure in the opposite direction. No whole-message test can express both,
+so the planner splits on the boundaries the user actually typed (`_CLAUSE_BOUNDARY`; a comma or
+period counts only when text follows it, so "1.5 cups" stays one number) and asks a question of the
+clauses that are not asking. A stated meal no longer needs a number either: "what did i eat today? i
+also had eggs for breakfast" logs the eggs, because reading it as only the question dropped them in
+silence. Four regression tests and two new eval scenarios pin the two phrasings the fix is for.
+
+The same round closed two smaller findings. The digest that replaced a logged phone number was an
+unsalted truncation of SHA-256 over a ten-digit id space, which is a lookup table rather than a mask:
+anyone holding the log can confirm a number they already suspect by trying it. It is now an HMAC
+keyed on the app secret, and the refusal path and the failed-reply path use the same key so one
+sender still correlates across lines. And a delivery that died behind the `200` could only be
+reported by the future's done callback, which runs on another thread with no trace of its own and can
+name nothing but the exception class — the delivery now logs its own trace id and the number of
+messages left unanswered before it re-raises.
+
 ## Phase 7 - Submission polish and interview rehearsal
 
 **Outcome:** a reviewer can run, understand, and evaluate the system quickly.
 
-- Finalize README sections required by the brief: setup, models, memory, tools, latency, trade-offs, time log, next steps, and AI-tool use.
-- Add architecture and sequence diagrams based on the implemented system.
-- Run from a fresh clone with only documented commands.
-- Record a 5-10 minute walkthrough: image case, correction case, memory, architecture, latency, and limitations.
-- Prepare system-design discussion for scale, privacy, reliability, and provider migration.
-- Audit repository for secrets and make the final commit history readable.
+- [x] Finalize README sections required by the brief: setup, models, memory, tools, latency, trade-offs, time log, next steps, and AI-tool use.
+- [ ] Add architecture and sequence diagrams based on the implemented system.
+- [x] Run from a fresh clone with only documented commands — `docs/CLEAN_CLONE.md`.
+- [x] Write the 5-10 minute walkthrough: image case, correction case, memory, architecture, latency, and limitations — README `## Walkthrough`. The video recording of it is the author's step and has not happened.
+- [ ] Prepare system-design discussion for scale, privacy, reliability, and provider migration.
+- [x] Audit repository for secrets and make the final commit history readable: `git log -p` over all commits and a working-tree scan found nothing — `.env` is untracked and ignored, `.env.example` carries keys with empty values only, and the single match for an assignment-looking string was a docstring showing a user how to set one.
 
 **Evidence:** clean-clone checklist, video outline, and completed submission checklist.
 

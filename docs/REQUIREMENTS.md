@@ -2,7 +2,7 @@
 
 ## Core requirements
 
-| Brief requirement | Planned implementation | Primary evidence |
+| Brief requirement | How it is met | Primary evidence |
 |---|---|---|
 | Conversational agent with tool calling | LangGraph plus narrow typed tools | Scenario evals and traces |
 | Persistent database | SQLite repositories and migrations | Restart integration test |
@@ -13,6 +13,11 @@
 | p50/p95 text and image latency | Instrumented benchmark harness | Versioned benchmark output |
 
 ## Supplied scenarios
+
+Every conversation in the brief appears verbatim in `evals/conversation_scenarios.json` as the eleven
+`supplied:` scenarios — the table below splits the photo case into "a photo" and "a photo with a
+caption", which the harness also grades as two. `python scripts/run_evals.py` and
+`python scripts/run_photo_evals.py` print a `PASS` per scenario.
 
 | Scenario | Expected behavior |
 |---|---|
@@ -29,11 +34,22 @@
 
 ## Submission requirements to preserve
 
-- Clean clone setup and descriptive incremental commits.
-- README sections for overview, setup, text/vision model choices, memory, tool design, p50/p95 latency, trade-offs, time breakdown, next steps, and AI-tool usage.
-- 5-10 minute video demonstrating at least one image case and one correction case, plus architecture, memory, latency, challenges, and any bonuses.
-- Honest disclosure of incomplete work.
-- Optional public LangSmith trace link.
+Status as of the last phase: done, or named as the thing that is not.
+
+- [x] Clean clone setup and descriptive incremental commits — `docs/CLEAN_CLONE.md` is that run,
+  recorded with what happened rather than what should happen.
+- [x] README sections for overview, setup, text/vision model choices, memory, tool design, p50/p95
+  latency, trade-offs, time breakdown, next steps, and AI-tool usage.
+- [x] A written 5-10 minute walkthrough covering one image case and one correction case, plus
+  architecture, memory, latency and limitations — the `## Walkthrough` section of the README, with
+  the replies it prints quoted from the clean-clone run.
+- [ ] The video itself. It has not been recorded: this environment can start the CLI but cannot
+  capture a screen, so recording it is the author's step, and the walkthrough section is its script.
+- [x] Honest disclosure of incomplete work — the README's Limitations, and the two keyless gaps in
+  `docs/CLEAN_CLONE.md` (no vision key, no public tunnel).
+- [ ] A public LangSmith trace link — optional, and deliberately absent: tracing is implemented
+  behind `CALORAI_TRACING` and unit-tested, but no project was created and no trace published. The
+  equivalent evidence that does exist is the per-turn `trace=` field on every log line.
 
 ## Intentional extension
 

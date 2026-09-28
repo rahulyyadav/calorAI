@@ -268,6 +268,7 @@ class Benchmark:
         return result
 
     def run(self) -> dict[str, Any]:
+        load_at_start = os.getloadavg()[0]
         paths = {
             "text_cold": self.measure("text", path="text", cold=True),
             "text_warm": self.measure("text", path="text", cold=False),
@@ -292,17 +293,23 @@ class Benchmark:
                 ),
                 "warm": "a turn on a database that has already answered this many turns",
             },
-            "environment": self.environment(),
+            "environment": self.environment(load_at_start),
             "results": {name: path.as_json() for name, path in paths.items()},
         }
 
-    def environment(self) -> dict[str, Any]:
+    def environment(self, load_at_start: float) -> dict[str, Any]:
         live_text = type(self.planner).__name__ == "ModelPlanner"
+        load_at_end = os.getloadavg()[0]
         return {
             "python": platform.python_version(),
             "platform": f"{platform.system()} {platform.release()}",
             "machine": platform.machine(),
             "cpus": os.cpu_count() or 1,
+            # Milliseconds measured while the machine is indexing a contact database are not the
+            # same number, and a reader cannot tell from the percentiles alone. Sampled at both
+            # ends of the run and reported as the worst, because a burst in the middle would
+            # otherwise be filed as a quiet machine.
+            "load_average_1m": round(max(load_at_start, load_at_end), 2),
             "git_commit": _git_commit(),
             "database": "sqlite",
             "text_model": self.settings.text_model if live_text else "rule-based planner",
@@ -321,14 +328,29 @@ class Benchmark:
 
 
 def _git_commit() -> str | None:
+    """Name the commit the measurement describes, and say so when the tree is not that commit.
+
+    An artifact citing a commit it did not run from is the difference between evidence and a
+    guess, so a dirty working tree is marked rather than rounded up to the last commit.
+    """
     try:
-        return subprocess.run(
+        commit = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
             cwd=ROOT,
             capture_output=True,
             text=True,
             timeout=5,
         ).stdout.strip()
+        if not commit:
+            return None
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain", "--", "src", "scripts"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout.strip()
+        return f"{commit}-dirty" if dirty else commit
     except OSError:  # pragma: no cover - a reviewer without git still gets a benchmark
         return None
 

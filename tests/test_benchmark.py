@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -106,6 +107,22 @@ def test_the_benchmark_result_file_is_machine_readable_and_labels_its_backing() 
     assert "setup_p50_ms" in report["definitions"]["cold"]
     for name in ("text_cold", "read_cold", "image_cold"):
         assert report["results"][name]["setup_p50_ms"] is not None
+    # A number timed on a machine that was also indexing something is a different number.
+    assert report["environment"]["load_average_1m"] >= 0
     # A number that does not say whether a provider was in the loop is not evidence.
     assert set(report["environment"]["model_backing"]) == {"text", "vision"}
     assert all(report["environment"]["model_backing"].values())
+
+
+@pytest.mark.parametrize("worktree", [" M src/calorai_agent/planning.py\n", "\n"])
+def test_an_artifact_names_the_commit_it_ran_from_and_admits_a_dirty_tree(
+    benchmark: ModuleType, monkeypatch: pytest.MonkeyPatch, worktree: str
+) -> None:
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        out = "a1b2c3d\n" if cmd[1] == "rev-parse" else worktree
+        return subprocess.CompletedProcess(cmd, 0, stdout=out, stderr="")
+
+    monkeypatch.setattr(benchmark.subprocess, "run", fake_run)
+
+    expected = "a1b2c3d-dirty" if worktree.strip() else "a1b2c3d"
+    assert benchmark._git_commit() == expected

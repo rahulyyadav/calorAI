@@ -191,8 +191,17 @@ REPEAT_WORDS = ("same as", "same for", "same thing", "what i had", "repeat", "us
 # adds the banana, because the copy is what the message is built on.
 ANAPHORIC_REPEAT_WORDS = ("same as", "same for", "same thing", "what i had")
 
-# Phrases that ask what is already on the record rather than naming a plate to log.
-LIST_QUESTION_PHRASES = ("what did i eat", "show meals", "meals today", "what have i eaten")
+# Phrases that ask what is already on the record rather than naming a plate to log. The yes/no
+# forms belong here too: "did i eat biryani today?" asks about the record, and answering it by
+# logging a biryani would invent the very meal the user is asking about.
+LIST_QUESTION_PHRASES = (
+    "what did i eat",
+    "show meals",
+    "meals today",
+    "what have i eaten",
+    "did i eat",
+    "did i have",
+)
 
 # A memory statement is its own turn: the agent records the fact and answers that, rather
 # than logging food and updating a preference in the same breath.
@@ -396,7 +405,20 @@ def _is_totals_question(text: str) -> bool:
 
 
 def _is_list_question(text: str) -> bool:
-    return any(phrase in text for phrase in LIST_QUESTION_PHRASES)
+    return any(phrase in text for phrase in LIST_QUESTION_PHRASES) and not _states_a_portion(text)
+
+
+def _states_a_portion(text: str) -> bool:
+    """True when a message claims a meal with an amount, even while asking for the list.
+
+    A question can carry a log: "what did i eat today? i also had 2 parathas" wants both answers,
+    and reading it as only the question loses the parathas without saying so. The totals read can
+    refuse any food name because its answer is a number, but a list answer is a list of food names,
+    so a bare food inside the question ("did i eat biryani") is a reference to the record rather
+    than a new claim. Only an amount the user spelled out makes the message a meal, and an amount
+    too large to believe belongs on the log path, where it is refused out loud instead of dropped.
+    """
+    return any(mention.explicit for mention in mentions_in(text).values() if not mention.denied)
 
 
 def _pure_read(text: str) -> ParsedMessage | None:

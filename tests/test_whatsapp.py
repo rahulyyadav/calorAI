@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -28,6 +29,7 @@ from calorai_agent.whatsapp import (
     is_fingerprinted_event,
     normalize_webhook,
     parse_webhook_body,
+    sender_for_log,
     signature_matches,
     webhook_challenge,
 )
@@ -318,6 +320,23 @@ def test_a_sender_we_did_not_list_never_reaches_the_agent() -> None:
 
     assert batch.empty
     assert refused == (STRANGER,)
+
+
+def test_a_refused_sender_is_logged_without_filing_their_number(caplog) -> None:
+    """A `wa_id` is a phone number, and refusals log at the default level.
+
+    The blocked stranger's number is the one thing a log should not accumulate: it identifies them,
+    it is of no use to the meal, and it would sit in a file long after the conversation ended. A
+    stable digest keeps one sender correlatable across lines, and the full id is in the app's own
+    webhook payload for whoever decides whether to allow it.
+    """
+    with caplog.at_level(logging.WARNING, logger="calorai_agent"):
+        _normalize(_text("1 biryani", sender=STRANGER))
+
+    assert STRANGER not in caplog.text
+    assert sender_for_log(STRANGER) in caplog.text
+    assert sender_for_log(STRANGER) == sender_for_log(STRANGER)
+    assert sender_for_log(STRANGER) != sender_for_log(SENDER)
 
 
 def test_an_empty_allow_list_refuses_everyone() -> None:

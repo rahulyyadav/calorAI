@@ -165,8 +165,19 @@ def normalize_webhook(
 
 def _refuse(refused: list[str], sender: str) -> None:
     if sender not in refused:
-        logger.warning("refused webhook from unlisted sender %s", sender)
+        logger.warning("refused webhook from unlisted sender %s", sender_for_log(sender))
         refused.append(sender)
+
+
+def sender_for_log(sender: str) -> str:
+    """A sender reduced to something a log can correlate without becoming a contact list.
+
+    A `wa_id` is a phone number, and refusals log at the default level, so the plain value would
+    file stranger's numbers in a log that outlives the conversation. The digest is stable, so one
+    blocked sender is still recognisable across lines; the full id is on the app's own webhook
+    payload when a number needs adding to the allow-list.
+    """
+    return f"wa#{hashlib.sha256(sender.encode()).hexdigest()[:10]}"
 
 
 def _wa_id(value: Any) -> str | None:
@@ -373,28 +384,45 @@ class MediaCache:
                 return cached
         payload = fetch()
         with self._lock:
-            # Two threads can fetch the same photo while the cache is cold, and whoever finishes
-            # second overwrites the first. A duplicate download is the cost; a torn payload is not.
+            # Two threads can fetch the same photo while the cache is cold, so whoever arrives
+            # second finds it already filed and drops their own copy: keeping both would count
+            # one photo's bytes twice, and the ceiling would then evict everything else to pay
+            # for a dinner it only has one of.
+            landed = self._entries.get(key)
+            if landed is not None:
+                return landed
             self._entries[key] = payload
             self._bytes += len(payload.data)
             self._trim()
         return payload
 
     def warm(self, key: str, fetch: Callable[[], ImagePayload]) -> bool:
-        """Fetch into the cache for later, reporting whether the bytes landed in it."""
+        """Fetch into the cache for later, reporting whether the bytes landed in it.
+
+        Nothing raises, because the caller is a prefetch that has no answer of its own to give: a
+        photo this step cannot prepare is a photo the turn that needs it will prepare, or fail to,
+        in front of the user. Anything at all can come out of a media read — a misconfigured base
+        URL is an `httpx.InvalidURL`, not a `MediaError` — and an exception that escaped here would
+        take the whole delivery down with it, after Meta had already been promised a 200.
+        """
         try:
             self.get_or_fetch(key, fetch)
         except MediaError as error:
-            # The turn that needs this photo will fetch it itself and hear the truth from it.
-            log_event(
-                logger,
-                "media_prefetch_failed",
-                level=logging.WARNING,
-                media_id=key,
-                reason=str(error),
-            )
-            return False
-        return True
+            reason = str(error)
+        except Exception as error:  # noqa: BLE001 - a prefetch must never end a delivery
+            # Only the class: a third-party error string can carry a signed download URL.
+            reason = type(error).__name__
+        else:
+            return True
+        # The turn that needs this photo will fetch it itself and hear the truth from it.
+        log_event(
+            logger,
+            "media_prefetch_failed",
+            level=logging.WARNING,
+            media_id=key,
+            reason=reason,
+        )
+        return False
 
     def _trim(self) -> None:
         while self._entries and self._bytes > self._max_bytes:
@@ -422,14 +450,16 @@ class WhatsAppMediaSource:
             return self._read(media)
         return self.cache.get_or_fetch(media.locator, lambda: self._read(media))
 
-    def prefetch(self, media: MediaRef) -> None:
+    def prefetch(self, media: MediaRef) -> bool:
         """Download a photo this delivery is going to need, before the turn asks for it.
 
         A warm-up cannot fail a user: a photo that will not download is fetched again by the turn
-        that needs it, which then gives the same honest answer it would have given anyway.
+        that needs it, which then gives the same honest answer it would have given anyway. What it
+        reports back is whether that retry will find the bytes already here.
         """
-        if self.cache is not None and media.source == "whatsapp_media":
-            self.cache.warm(media.locator, lambda: self._read(media))
+        if self.cache is None or media.source != "whatsapp_media":
+            return False
+        return self.cache.warm(media.locator, lambda: self._read(media))
 
     def _read(self, media: MediaRef) -> ImagePayload:
         with span(logger, "media_fetch", kind="whatsapp_media", media_id=media.locator) as report:

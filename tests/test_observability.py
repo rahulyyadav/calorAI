@@ -135,6 +135,29 @@ def test_a_span_that_ends_in_a_failure_still_reports(records: Any) -> None:
     assert record["duration_ms"] >= 0
 
 
+def test_a_span_survives_a_field_the_measured_work_called_status(records: Any) -> None:
+    """`status` belongs to the span, not to whatever it was measuring.
+
+    A span writes its duration and outcome into the same dict the work was handed, and the work is
+    free to add a field of its own. Two values for one keyword argument would raise inside the
+    `finally`, and the line that reported the failure would be the thing that failed.
+    """
+    with span(LOGGER, "media_fetch", kind="whatsapp_media") as report:
+        report["status"] = "already cached"
+
+    record = records()[-1]
+    assert record["status"] == "ok"
+    assert record["kind"] == "whatsapp_media"
+
+
+def test_a_text_field_with_spaces_in_it_is_quoted(restored: logging.Logger) -> None:
+    """`reason=it could not be downloaded` reads as four fields and cannot be grepped back apart."""
+    out = _installed("text")
+    log_event(LOGGER, "media_prefetch_failed", reason="it could not be downloaded")
+
+    assert 'reason="it could not be downloaded"' in out.getvalue()
+
+
 def test_the_text_view_shows_the_same_fields_as_json(restored: logging.Logger) -> None:
     out = _installed("text")
     with trace_scope("t1"):

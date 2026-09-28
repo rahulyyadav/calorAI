@@ -53,6 +53,13 @@ TEXT_MESSAGES = (
     "had a banana and coffee",
     "two idlis and chutney for the evening",
 )
+# The questions the product answers most often, and the ones the rules settle without a model.
+READ_MESSAGES = (
+    "how am I doing today?",
+    "what have I eaten today?",
+    "how much protein have I had today?",
+    "how many calories have I eaten today?",
+)
 COMPONENT_SPANS = ("model_request", "media_fetch")
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -107,6 +114,8 @@ class Samples:
     turns: list[float] = field(default_factory=list)
     components: dict[str, list[float]] = field(default_factory=dict)
     routes: dict[str, int] = field(default_factory=dict)
+    model_calls: int = 0
+    setup: list[float] = field(default_factory=list)
 
     def record(self, durations: dict[str, float], components: dict[str, list[float]]) -> None:
         if "duration_ms" in durations:
@@ -116,21 +125,34 @@ class Samples:
             self.routes[route] = self.routes.get(route, 0) + 1
         for event, values in components.items():
             self.components.setdefault(event, []).extend(values)
+        self.model_calls += len(components.get("model_request", ()))
 
     def as_json(self) -> dict[str, Any]:
-        return {
+        report: dict[str, Any] = {
             "samples": len(self.turns),
             "p50_ms": _percentile(self.turns, 50),
             "p95_ms": _percentile(self.turns, 95),
             "min_ms": round(min(self.turns), 2) if self.turns else None,
             "max_ms": round(max(self.turns), 2) if self.turns else None,
             "mean_ms": round(statistics.fmean(self.turns), 2) if self.turns else None,
+            # The count of billed requests per sample is what makes the read path comparable to the
+            # logging path: with a live key it says how many round trips each turn paid for.
+            "model_calls_per_sample": (
+                round(self.model_calls / len(self.turns), 2) if self.turns else None
+            ),
             "routes": self.routes,
             "components": {
                 event: {"p50_ms": _percentile(values, 50), "p95_ms": _percentile(values, 95)}
                 for event, values in self.components.items()
             },
         }
+        if self.setup:
+            # Opening a database file for the first time is not part of the turn the user waits
+            # for, but it is part of the cold path, and an unlabelled omission invites the
+            # reading that cold == turn + setup.
+            report["setup_p50_ms"] = _percentile(self.setup, 50)
+            report["setup_p95_ms"] = _percentile(self.setup, 95)
+        return report
 
 
 def _percentile(values: list[float], percent: int) -> float | None:
@@ -200,44 +222,76 @@ class Benchmark:
         path.write_bytes(self.image.read_bytes() if self.image else png_bytes())
         return MediaRef(external_id=name, locator=str(path))
 
-    def turn(self, agent: MealAgent, index: int, photo: bool) -> None:
-        moment = START + timedelta(minutes=index)
-        media = self.photo(f"bench-{index}") if photo else None
-        text = "" if photo else TEXT_MESSAGES[index % len(TEXT_MESSAGES)]
+    def turn(self, agent: MealAgent, index: int, path: str) -> None:
         self.collector.start()
         started = time.perf_counter()
-        agent.invoke("bench-user", text, timezone="UTC", now=moment, media=media)
+        self._run(agent, index, path)
         if not self.collector.durations:
             # A turn that logged nothing still cost the user this much.
             self.collector.durations = {"duration_ms": (time.perf_counter() - started) * 1000}
 
-    def measure(self, name: str, *, photo: bool, cold: bool) -> Samples:
+    def _run(self, agent: MealAgent, index: int, path: str) -> None:
+        moment = START + timedelta(minutes=index)
+        media = self.photo(f"bench-{moment:%H%M%S}") if path == "image" else None
+        text = (
+            ""
+            if path == "image"
+            else (
+                READ_MESSAGES[index % len(READ_MESSAGES)]
+                if path == "read"
+                else TEXT_MESSAGES[index % len(TEXT_MESSAGES)]
+            )
+        )
+        agent.invoke("bench-user", text, timezone="UTC", now=moment, media=media)
+
+    def measure(self, name: str, *, path: str, cold: bool) -> Samples:
         """Cold pays for a database nobody has opened yet; warm pays for the model."""
         result = Samples()
         if cold:
             for index in range(self.samples):
-                self.turn(self.application(f"cold-{name}-{index}"), index, photo)
+                started = time.perf_counter()
+                agent = self.application(f"cold-{name}-{index}")
+                result.setup.append((time.perf_counter() - started) * 1000)
+                if path == "read":
+                    # A read of an empty day has nothing to add up, so the meal goes in first.
+                    self._run(agent, -index - 1, "text")
+                self.turn(agent, index, path)
                 result.record(self.collector.durations, self.collector.components)
             return result
         agent = self.application(f"warm-{name}")
+        if path == "read":
+            self._run(agent, -1, "text")
         for index in range(self.warm_up + self.samples):
-            self.turn(agent, index, photo)
+            self.turn(agent, index, path)
             if index >= self.warm_up:
                 result.record(self.collector.durations, self.collector.components)
         return result
 
     def run(self) -> dict[str, Any]:
         paths = {
-            "text_cold": self.measure("text", photo=False, cold=True),
-            "text_warm": self.measure("text", photo=False, cold=False),
-            "image_cold": self.measure("image", photo=True, cold=True),
-            "image_warm": self.measure("image", photo=True, cold=False),
+            "text_cold": self.measure("text", path="text", cold=True),
+            "text_warm": self.measure("text", path="text", cold=False),
+            "read_cold": self.measure("read", path="read", cold=True),
+            "read_warm": self.measure("read", path="read", cold=False),
+            "image_cold": self.measure("image", path="image", cold=True),
+            "image_warm": self.measure("image", path="image", cold=False),
         }
         return {
             "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
             "command": " ".join(sys.argv[1:]) or "python scripts/benchmark_latency.py",
             "samples": self.samples,
             "warm_up": self.warm_up,
+            "definitions": {
+                "text": "a meal logged from words, end to end",
+                "read": "a totals or meal-list question, which the rules settle from the database",
+                "image": "a photo and its caption, priced from the reference table",
+                "cold": (
+                    "the first turn on a database file this process created and had never opened; "
+                    "opening it is reported separately as setup_p50_ms/setup_p95_ms and is not "
+                    "inside the turn percentiles"
+                ),
+                "warm": "a turn on a database that has already answered this many turns",
+            },
             "environment": self.environment(),
             "results": {name: path.as_json() for name, path in paths.items()},
         }
@@ -259,7 +313,9 @@ class Benchmark:
             },
             "note": (
                 "Stand-in numbers are application overhead only: no provider round trip is "
-                "included. Re-run with API keys for user-visible latency."
+                "included, and with no key the model call the read path skips was never going to "
+                "be billed here, so the read rows show what that route costs rather than what it "
+                "saves. Re-run with API keys for user-visible latency and for the saving."
             ),
         }
 
@@ -283,12 +339,18 @@ def report(payload: dict[str, Any]) -> None:
         f"n={payload['samples']} warm-up={payload['warm_up']} "
         f"text={backing['text']} vision={backing['vision']}"
     )
-    print(f"{'path':<12} {'p50 ms':>9} {'p95 ms':>9} {'mean':>8} {'min':>8} {'max':>9}")
+    print(
+        f"{'path':<12} {'p50 ms':>9} {'p95 ms':>9} {'mean':>8} {'min':>8} {'max':>9} {'model':>6}"
+    )
     for name, result in payload["results"].items():
         print(
             f"{name:<12} {result['p50_ms']:>9} {result['p95_ms']:>9} "
-            f"{result['mean_ms']:>8} {result['min_ms']:>8} {result['max_ms']:>9}"
+            f"{result['mean_ms']:>8} {result['min_ms']:>8} {result['max_ms']:>9} "
+            f"{result['model_calls_per_sample']:>6}"
         )
+        setup = result.get("setup_p50_ms")
+        if setup is not None:
+            print(f"{'':<12}   - opening the database p50={setup} p95={result['setup_p95_ms']}")
         for event, values in result["components"].items():
             print(f"{'':<12}   - {event} p50={values['p50_ms']} p95={values['p95_ms']}")
 

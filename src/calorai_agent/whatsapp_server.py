@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import logging
 from collections.abc import Callable, Mapping
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Protocol
@@ -19,7 +19,13 @@ from urllib.parse import parse_qs, urlparse
 from calorai_agent.config import Settings
 from calorai_agent.domain import InboundMessage, MediaRef
 from calorai_agent.graph import MealAgent
-from calorai_agent.observability import log_event, log_level_from_env, span, trace_scope
+from calorai_agent.observability import (
+    current_trace,
+    log_event,
+    log_level_from_env,
+    span,
+    trace_scope,
+)
 from calorai_agent.repository import MealRepository
 from calorai_agent.tools import RecordInboundInput
 from calorai_agent.whatsapp import (
@@ -31,6 +37,7 @@ from calorai_agent.whatsapp import (
     is_fingerprinted_event,
     normalize_webhook,
     parse_webhook_body,
+    sender_for_log,
     signature_matches,
     webhook_challenge,
 )
@@ -56,9 +63,13 @@ MAX_PARALLEL_MEDIA_FETCHES = 4
 
 
 class MediaPrefetcher(Protocol):
-    """Something that can start a photo download early, and never raises doing it."""
+    """Something that can start a photo download early, and never raises doing it.
 
-    def prefetch(self, media: MediaRef) -> None: ...
+    Returning whether the photo landed is not decoration: a warm-up that quietly failed is worth
+    reporting, because the turn that follows will pay for the same download again.
+    """
+
+    def prefetch(self, media: MediaRef) -> bool: ...
 
 
 class InlineExecutor:
@@ -82,10 +93,22 @@ class WorkerExecutor:
         self.pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="calorai-reply")
 
     def submit(self, work: Callable[[], None]) -> None:
-        self.pool.submit(work)
+        future = self.pool.submit(work)
+        # Nobody keeps this future: the request thread has already promised Meta a 200 and moved
+        # on. Without a callback, work that died here would leave no trace at all — the user would
+        # wait for a reply, and the log would show a delivery that was never answered and never
+        # retried. Only the exception class is reported, because an exception message can quote the
+        # meal the message described, and logs do not carry those.
+        future.add_done_callback(_report_lost_work)
 
     def shutdown(self) -> None:
         self.pool.shutdown(wait=True)
+
+
+def _report_lost_work(future: Future[Any]) -> None:
+    error = future.exception()
+    if error is not None:
+        logger.error("delivery failed after the acknowledgement: %s", type(error).__name__)
 
 
 class WebhookApplication:
@@ -145,7 +168,9 @@ class WebhookApplication:
             payload, timezone=self.timezone, allowed_users=self.allowed_users
         )
         for sender in refused:
-            logger.warning("ignored %s message(s) from unlisted sender %s", CHANNEL, sender)
+            logger.warning(
+                "ignored %s message(s) from unlisted sender %s", CHANNEL, sender_for_log(sender)
+            )
         if not batch.empty:
             self.executor.submit(lambda: self.deliver(batch))
         return 200, "ok"
@@ -169,14 +194,30 @@ class WebhookApplication:
                 photos.append(message.media)
             if len(photos) == MAX_MEDIA_PER_DELIVERY:
                 break
-        if self.media is None or not photos:
+        media = self.media
+        if media is None or not photos:
             return
         if len(photos) == 1:
-            self.media.prefetch(photos[0])
-            return
-        with ThreadPoolExecutor(max_workers=min(len(photos), MAX_PARALLEL_MEDIA_FETCHES)) as pool:
-            list(pool.map(self.media.prefetch, photos))
-        log_event(logger, "media_prefetched", photos=len(photos))
+            warmed = int(media.prefetch(photos[0]))
+        else:
+            warmed = sum(self._prefetch_together(media, photos))
+        log_event(logger, "media_prefetched", photos=len(photos), warmed=warmed)
+
+    def _prefetch_together(self, media: MediaPrefetcher, photos: list[MediaRef]) -> list[bool]:
+        """Warm several photos at once, each under the trace of the delivery that asked."""
+        trace = current_trace()
+
+        def warm(photo: MediaRef) -> bool:
+            # A worker thread inherits no contextvar, so without this the fetch it logs carries no
+            # trace id and cannot be tied back to the turn that caused it.
+            with trace_scope(trace):
+                return media.prefetch(photo)
+
+        with ThreadPoolExecutor(
+            max_workers=min(len(photos), MAX_PARALLEL_MEDIA_FETCHES),
+            thread_name_prefix="calorai-media",
+        ) as pool:
+            return list(pool.map(warm, photos))
 
     def answer(self, batch: WebhookBatch) -> None:
         """Do the work behind the acknowledgement: every meal, then every honest decline.
@@ -267,7 +308,7 @@ class WebhookApplication:
         try:
             self.client.send_text(to, body)
         except WhatsAppError as error:
-            logger.error("reply to %s failed: %s", to, error)
+            logger.error("reply to %s failed: %s", sender_for_log(to), error)
 
 
 def _one(query: Mapping[str, list[str]], name: str) -> str | None:

@@ -334,6 +334,35 @@
         "totals": { "0": { "kcal": "420" } },
         "turn_contains": [null, "Today: 420 kcal"]
       }
+    },
+    {
+      "name": "adversarial: a totals question that also states a portion logs the portion",
+      "claim": "the deterministic read path never swallows a meal that came with the question",
+      "turns": [
+        { "text": "what did I eat today? i also had 2 parathas for breakfast" },
+        { "text": "what did i eat today?" }
+      ],
+      "expect": {
+        "routes": ["log_meal", "list_meals"],
+        "meals": { "0": 1 },
+        "meal_items": { "0": [["paratha"]] },
+        "meal_quantities": { "0": [["2"]] },
+        "totals": { "0": { "kcal": "520", "protein_g": "12" } },
+        "turn_contains": [null, "paratha"]
+      }
+    },
+    {
+      "name": "adversarial: asking whether a meal was logged does not log it",
+      "claim": "a yes/no question about the record is answered from the record, never invented",
+      "turns": [
+        { "text": "did I eat biryani today?" },
+        { "text": "what did i eat today?" }
+      ],
+      "expect": {
+        "routes": ["list_meals", "list_meals"],
+        "meals": { "0": 0 },
+        "totals": { "0": { "kcal": "0" } }
+      }
     }
   ]
 }

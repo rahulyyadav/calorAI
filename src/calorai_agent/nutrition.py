@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from functools import cache
+from functools import lru_cache
 
 from calorai_agent.domain import Nutrition
 
@@ -88,12 +88,14 @@ ALIASES: dict[str, str] = {
 }
 
 
-@cache
+@lru_cache(maxsize=512)
 def _resolve(cleaned: str) -> FoodReference | None:
     """The table walk for an already-normalized name. Cached because it is pure and hot.
 
     Every food in every message, vision answer and alias scan lands here, and the answer cannot
-    change while the process runs — a stale cache is not a thing this function can produce.
+    change while the process runs — a stale cache is not a thing this function can produce. The
+    bound is not decoration: the names arriving here are model output, and a vision model that
+    invents five hundred dishes must not be able to grow this cache for the life of the process.
     """
     if cleaned in FOODS:
         return FOODS[cleaned]

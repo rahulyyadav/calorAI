@@ -219,6 +219,30 @@ def test_a_vision_model_answering_in_prose_is_refused_not_guessed(
     assert "could not get a reliable read" in reply
 
 
+def test_a_rejected_vision_answer_does_not_put_the_plate_in_the_log(
+    repository: MealRepository, tmp_path: Path, caplog
+) -> None:
+    """A validation error quotes the value it rejected, and that value is someone's dinner.
+
+    The model here answers in the wrong field type, so pydantic would print the dish description
+    verbatim in its error. The failure is worth logging — how often a read comes back malformed is
+    the reason to change a prompt — the words in it are not.
+    """
+    plate = "a large portion of butter chicken with two naan, ghee visible"
+    agent = _vision_agent(
+        repository,
+        _content(json.dumps({"items": [{"name": plate, "quantity": 1, "confidence": plate}]})),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="calorai_agent"):
+        reply = agent.invoke("user-1", "", now=DAY, media=_photo(tmp_path))
+
+    assert "could not get a reliable read" in reply
+    assert _meals(repository) == []
+    assert plate not in caplog.text
+    assert "ValidationError" in caplog.text
+
+
 def test_a_corrupt_photo_costs_no_provider_request(
     repository: MealRepository, tmp_path: Path
 ) -> None:
@@ -266,4 +290,10 @@ def test_the_same_delivery_racing_itself_logs_one_meal(repository: MealRepositor
     assert not any(thread.is_alive() for thread in threads)
     assert len(_meals(repository)) == 1
     assert _event_count(repository) == 1
+    # Both threads answered, and each answer is one a user can act on. The loser of the race is
+    # allowed to say the message is already in hand — that is the truthful report of a turn the
+    # other thread is still running — but "understood" or silence would not be.
     assert all(reply for reply in replies), replies
+    assert all(
+        reply.startswith(("Logged", "I already received that message")) for reply in replies
+    ), replies

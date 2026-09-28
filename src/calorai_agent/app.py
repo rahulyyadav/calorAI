@@ -71,12 +71,14 @@ class EitherMediaSource:
             raise MediaError("WhatsApp media needs the Graph access token to be configured.")
         return self.whatsapp.fetch(media)
 
-    def prefetch(self, media: MediaRef) -> None:
-        """Warm a photo the delivery will ask for. A local file is already as warm as it gets."""
+    def prefetch(self, media: MediaRef) -> bool:
+        """Warm a photo the delivery will ask for, reporting whether the bytes are now here.
+
+        A local file is already as warm as it gets: nothing is downloaded, so nothing landed.
+        """
         source = self.whatsapp if media.source != "local_path" else self.local
         prefetch = getattr(source, "prefetch", None)
-        if callable(prefetch):
-            prefetch(media)
+        return bool(prefetch(media)) if callable(prefetch) else False
 
 
 def build_graph_client(settings: Settings) -> GraphClient | None:

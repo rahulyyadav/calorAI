@@ -296,6 +296,45 @@ def test_an_article_naming_an_occasion_is_not_read_as_a_second_portion() -> None
     assert parsed.draft.items[0].confidence == 0.8
 
 
+def test_a_question_that_also_states_a_portion_logs_the_portion_it_stated() -> None:
+    """A fast read must never swallow the meal that came with the question.
+
+    "what did i eat today? i also had 2 parathas" asks for the list and states a plate in one
+    breath. Reading it as only the question answered half the message and dropped two parathas
+    without saying they were missing, which is the one failure this product cannot afford.
+    """
+    planner = RuleBasedPlanner()
+    parsed = planner.parse(_request("what did I eat today? i also had 2 parathas for breakfast"))
+
+    assert parsed.intent is AgentIntent.LOG_MEAL
+    assert parsed.draft is not None
+    assert [(item.name, item.quantity) for item in parsed.draft.items] == [
+        ("paratha", Decimal("2"))
+    ]
+    # The same message on the fast path: it is not a pure read, so no planner route takes it.
+    assert planner.deterministic_read(_request("what did I eat today? i also had 2 parathas")) is (
+        None
+    )
+
+
+def test_an_amount_too_large_to_believe_still_leaves_the_read_path() -> None:
+    """An unbelievable amount is still a claim, and a claim is refused out loud, not dropped."""
+    parsed = RuleBasedPlanner().parse(_request("what did I eat today? i ate 50 rotis"))
+
+    assert parsed.intent is AgentIntent.LOG_MEAL
+    assert parsed.draft is not None
+    assert parsed.draft.items[0].confidence < 0.55
+
+
+def test_a_question_about_the_record_lists_it_instead_of_logging_what_it_asked_about() -> None:
+    """ "did i eat biryani today?" is about the record, and answering it by logging a biryani would
+    invent the very meal the user was asking about."""
+    parsed = RuleBasedPlanner().parse(_request("did I eat biryani today?"))
+
+    assert parsed.intent is AgentIntent.LIST_MEALS
+    assert parsed.draft is None
+
+
 def test_yesterday_meal_is_stamped_on_yesterday() -> None:
     parsed = RuleBasedPlanner().parse(_request("had 2 eggs for dinner yesterday"))
 

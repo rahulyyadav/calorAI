@@ -22,16 +22,25 @@ from typing import Any
 from urllib.parse import parse_qs
 from zoneinfo import ZoneInfo
 
+import httpx
 import pytest
 
 from calorai_agent.app import build_graph_client, create_whatsapp_app
 from calorai_agent.config import Settings
+from calorai_agent.domain import MediaRef
 from calorai_agent.graph import MealAgent
+from calorai_agent.observability import FIELDS_ATTR, current_trace, trace_scope
 from calorai_agent.planning import RuleBasedPlanner
 from calorai_agent.repository import MealRepository
 from calorai_agent.tools import MealTools
 from calorai_agent.vision import VisionInterpreter
-from calorai_agent.whatsapp import GraphClient, MediaCache, WhatsAppError, WhatsAppMediaSource
+from calorai_agent.whatsapp import (
+    GraphClient,
+    MediaCache,
+    WhatsAppError,
+    WhatsAppMediaSource,
+    normalize_webhook,
+)
 from calorai_agent.whatsapp_server import (
     INTERNAL_FAILURE_REPLY,
     InlineExecutor,
@@ -76,6 +85,7 @@ class FakeGraph(GraphClient):
         *,
         photo: bytes | None = PNG,
         downloads_fail: bool = False,
+        crash: Exception | None = None,
         sends_fail: bool = False,
         receipts_fail: bool = False,
         delay: float = 0.0,
@@ -85,6 +95,8 @@ class FakeGraph(GraphClient):
         )
         self.photo = photo
         self.downloads_fail = downloads_fail
+        # A failure the media reader does not model, raised from underneath it.
+        self.crash = crash
         self.sends_fail = sends_fail
         self.receipts_fail = receipts_fail
         self.delay = delay
@@ -106,6 +118,8 @@ class FakeGraph(GraphClient):
 
     def download(self, media_id: str) -> bytes:
         self.download_calls.append(media_id)
+        if self.crash is not None:
+            raise self.crash
         if self.delay:
             time.sleep(self.delay)
         if self.downloads_fail:
@@ -532,6 +546,97 @@ def test_a_text_delivery_warms_nothing_at_all(repository: MealRepository) -> Non
     _deliver(application, _text("had two dosas"))
 
     assert graph.download_calls == []
+
+
+def test_a_download_that_fails_for_a_reason_nobody_modelled_still_answers_the_delivery(
+    repository: MealRepository,
+) -> None:
+    """An unforeseen crash in a warm-up cannot be allowed to delete a delivery.
+
+    `MediaError` is the failure the media reader raises deliberately; a base URL without a scheme
+    raises `httpx.InvalidURL` from underneath it. Meta has already been promised a 200 by then, so
+    work that died at that point would leave both messages unanswered with no retry ever coming —
+    and the text message had nothing to do with the photo.
+    """
+    application, graph = _app(repository, FakeGraph(crash=httpx.InvalidURL("no scheme")))
+
+    _deliver(application, _text("had two dosas"), _photo(msg_id="wamid.P"))
+
+    bodies = [reply for _, reply in graph.replies]
+    assert len(bodies) == 2
+    assert any("dosa" in body.lower() for body in bodies)
+    assert INTERNAL_FAILURE_REPLY in bodies
+    assert len(repository.list_for_day(WA_USER, DAY)) == 1
+
+
+class TracedPrefetcher:
+    """A warm-up that reports which trace and thread it ran on, and overlaps with its sibling."""
+
+    def __init__(self) -> None:
+        self.traces: list[str] = []
+        self.threads: list[int] = []
+
+    def prefetch(self, media: MediaRef) -> bool:
+        self.traces.append(current_trace())
+        self.threads.append(threading.get_ident())
+        time.sleep(0.01)
+        return True
+
+
+def test_photos_warmed_off_the_delivery_thread_keep_its_trace(repository: MealRepository) -> None:
+    """A worker thread inherits no contextvar, so the fetch it logs would be uncorrelated.
+
+    The parallel warm-up exists to overlap two downloads; if that is where a photo read fails, the
+    line has to belong to the delivery that asked for it or the trace stops being a trace.
+    """
+    application, _graph = _app(repository)
+    prefetcher = TracedPrefetcher()
+    application.media = prefetcher
+    payload = json.loads(_body(_photo(msg_id="wamid.A"), _photo(msg_id="wamid.B")))
+    batch, _refused = normalize_webhook(payload, timezone=ZONE, allowed_users=frozenset({WA_USER}))
+
+    with trace_scope("delivery-trace"):
+        application.prefetch(batch)
+
+    assert prefetcher.traces == ["delivery-trace", "delivery-trace"]
+    assert len(set(prefetcher.threads)) == 2
+
+
+def test_the_delivery_reports_how_many_photos_the_warm_up_actually_got(
+    repository: MealRepository,
+) -> None:
+    """One line, however many plates: asking for three photos and getting one is a fact."""
+    events: list[dict[str, Any]] = []
+    handler = _FieldHandler(events)
+    loggers = logging.getLogger("calorai_agent")
+    was = loggers.level
+    loggers.setLevel(logging.INFO)
+    loggers.addHandler(handler)
+    try:
+        application, _graph = _app(repository)
+        _deliver(application, _photo(msg_id="wamid.A"), _photo(msg_id="wamid.B"))
+        _deliver(application, _photo(msg_id="wamid.C", media_id="media-3"))
+    finally:
+        loggers.removeHandler(handler)
+        loggers.setLevel(was)
+
+    assert [row for row in events if row["event"] == "media_prefetched"] == [
+        {"event": "media_prefetched", "photos": 2, "warmed": 2},
+        {"event": "media_prefetched", "photos": 1, "warmed": 1},
+    ]
+
+
+class _FieldHandler(logging.Handler):
+    """Collects the structured fields a log line carried, the way an aggregator would read them."""
+
+    def __init__(self, sink: list[dict[str, Any]]) -> None:
+        super().__init__()
+        self.sink = sink
+
+    def emit(self, record: logging.LogRecord) -> None:
+        fields = getattr(record, FIELDS_ATTR, None)
+        if isinstance(fields, dict):
+            self.sink.append({"event": record.getMessage(), **fields})
 
 
 # --- what we cannot eat, and who may send it -----------------------------------------

@@ -112,13 +112,23 @@ class TextFormatter(logging.Formatter):
         event = str(fields.pop("event"))
         trace = getattr(record, "trace_id", "") or "-"
         head = f"{_stamp(record)} {record.levelname.lower():7} trace={trace}"
-        rendered = " ".join(f"{key}={value}" for key, value in fields.items())
+        rendered = " ".join(f"{key}={_quote(value)}" for key, value in fields.items())
         line = f"{head} {event} {rendered}".rstrip()
         if record.exc_info:
             # Overriding format() skips the traceback the base class appends, and a failure log
             # without one is the least useful line in the file.
             line = f"{line}\n{self.formatException(record.exc_info)}"
         return line
+
+
+def _quote(value: Any) -> str:
+    """Render one field so a terminal reader can tell where it ends.
+
+    An unquoted `reason=it could not be downloaded` reads as several fields and cannot be grepped
+    back apart, so anything with a space in it is quoted the way the JSON view already quotes it.
+    """
+    text = str(value)
+    return json.dumps(text) if " " in text or not text else text
 
 
 def configure_logging(*, fmt: str = "text", level: str | int = "INFO") -> logging.Logger:
@@ -162,6 +172,10 @@ def span(logger: logging.Logger, event: str, **fields: Any) -> Iterator[dict[str
         status = "ok"
     finally:
         reported["duration_ms"] = round((time.perf_counter() - started) * 1000, 2)
+        # The span's own status wins: a measured unit of work that writes a `status` field into the
+        # dict it was handed must not crash the log line that reports it, and must not report a
+        # failed span as fine either.
+        reported.pop("status", None)
         log_event(
             logger,
             event,
@@ -176,6 +190,10 @@ def configure_tracing(*, enabled: bool, project: str = "calorai") -> bool:
 
     Enabling without a key is not a half-configured upload: the graph runs untraced and says so,
     because silently buffering spans is how a demo ends up sending them somewhere later.
+
+    Declining writes `false` even over a shell that already exported `true`. That is on purpose:
+    this process holds what someone ate, and an inherited variable from another tool's setup must
+    not turn an upload to a third party into this app's default.
     """
     if enabled and not os.getenv(TRACING_KEY_ENV):
         log_event(

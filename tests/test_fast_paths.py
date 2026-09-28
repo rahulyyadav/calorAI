@@ -8,9 +8,11 @@ answer did not move.
 from __future__ import annotations
 
 import json
+import threading
 from datetime import UTC, datetime
 from typing import Any
 
+import httpx
 import pytest
 
 from calorai_agent.app import EitherMediaSource
@@ -169,18 +171,69 @@ def test_a_photo_that_will_not_warm_reports_instead_of_raising() -> None:
     assert cache.warm("media-1", lambda: _payload(2)) is True
 
 
+def test_a_warm_up_that_crashes_for_a_reason_nobody_named_still_only_reports() -> None:
+    """A prefetch is allowed to fail and is never allowed to take the delivery with it.
+
+    `MediaError` is the failure the media reader raises on purpose. A misconfigured Graph base URL
+    raises `httpx.InvalidURL` from underneath it, and an exception that escaped the warm-up would
+    end the worker before a single message of an already-acknowledged delivery was answered.
+    """
+    cache = MediaCache()
+
+    def broken() -> ImagePayload:
+        raise httpx.InvalidURL("no scheme")
+
+    assert cache.warm("media-1", broken) is False
+    assert len(cache) == 0
+
+
+def test_two_threads_warming_one_photo_count_its_bytes_once() -> None:
+    """The byte ceiling is what evicts a photo, so double-counting one evicts the others for it.
+
+    Two threads can both download the same media id while the cache is cold. Whoever lands second
+    drops its copy, and the accounting has to drop it too.
+    """
+    released = threading.Event()
+    both_inside = threading.Barrier(3)
+    cache = MediaCache(max_bytes=25)
+
+    def slow_fetch() -> ImagePayload:
+        both_inside.wait()
+        released.wait()
+        return _payload(1)
+
+    def warm() -> None:
+        cache.warm("media-1", slow_fetch)
+
+    threads = [threading.Thread(target=warm) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    both_inside.wait()
+    released.set()
+    for thread in threads:
+        thread.join()
+
+    cache.get_or_fetch("media-2", lambda: _payload(2))
+
+    # 20 bytes of one photo plus 10 of the next fit under 25; 30 counted twice would not.
+    assert "media-1" in cache
+    assert "media-2" in cache
+
+
 # --- the pipeline that chooses where a photo comes from -------------------------------
 
 
 class RecordingSource:
-    def __init__(self) -> None:
+    def __init__(self, *, warms: bool = True) -> None:
         self.warmed: list[str] = []
+        self._warms = warms
 
     def fetch(self, media: MediaRef) -> ImagePayload:
         return _payload(3)
 
-    def prefetch(self, media: MediaRef) -> None:
+    def prefetch(self, media: MediaRef) -> bool:
         self.warmed.append(media.locator)
+        return self._warms
 
 
 class SilentSource:
@@ -198,8 +251,7 @@ def test_a_whatsapp_photo_is_warmed_through_the_source_that_owns_it() -> None:
     recorder = RecordingSource()
     pipeline = EitherMediaSource(local=SilentSource(), whatsapp=recorder)
 
-    pipeline.prefetch(_media("whatsapp_media", "media-9"))
-
+    assert pipeline.prefetch(_media("whatsapp_media", "media-9")) is True
     assert recorder.warmed == ["media-9"]
 
 
@@ -207,12 +259,19 @@ def test_a_local_photo_is_never_warmed_and_nothing_is_said_about_it() -> None:
     recorder = RecordingSource()
     pipeline = EitherMediaSource(local=SilentSource(), whatsapp=recorder)
 
-    pipeline.prefetch(_media("local_path", "/tmp/plate.jpg"))
-
+    assert pipeline.prefetch(_media("local_path", "/tmp/plate.jpg")) is False
     assert recorder.warmed == []
 
 
 def test_a_source_that_cannot_warm_is_simply_not_asked_to() -> None:
     pipeline = EitherMediaSource(local=SilentSource(), whatsapp=SilentSource())
 
-    pipeline.prefetch(_media("whatsapp_media", "media-9"))
+    assert pipeline.prefetch(_media("whatsapp_media", "media-9")) is False
+
+
+def test_a_warm_up_that_failed_is_reported_as_a_photo_that_is_not_ready() -> None:
+    """The delivery logs how many photos it actually got, not how many it asked for."""
+    recorder = RecordingSource(warms=False)
+    pipeline = EitherMediaSource(local=SilentSource(), whatsapp=recorder)
+
+    assert pipeline.prefetch(_media("whatsapp_media", "media-9")) is False

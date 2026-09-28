@@ -172,8 +172,11 @@ class VisionInterpreter:
             raw = self.client.observe(system=system, user=user, image=payload)
             answer = _ObservationAnswer.model_validate(parse_json_object(raw))
         except (ModelProviderError, ValidationError) as error:
-            logger.warning("vision read failed for media %s: %s", media.external_id, error)
-            raise VisionError(f"vision model gave nothing usable: {error}") from error
+            # A validation error quotes the value it rejected, and that value is the model's
+            # description of someone's plate. The log and the exception name the failure instead.
+            reason = type(error).__name__
+            logger.warning("vision read failed for media %s: %s", media.external_id, reason)
+            raise VisionError(f"vision model gave nothing usable ({reason})") from error
         observations, unrecognized = _normalize(answer.items)
         return VisionReading(
             observations=observations,

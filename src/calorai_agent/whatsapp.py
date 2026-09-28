@@ -117,7 +117,11 @@ class WebhookBatch:
 
 
 def normalize_webhook(
-    payload: Mapping[str, Any], *, timezone: str, allowed_users: frozenset[str]
+    payload: Mapping[str, Any],
+    *,
+    timezone: str,
+    allowed_users: frozenset[str],
+    log_key: str = "",
 ) -> tuple[WebhookBatch, tuple[str, ...]]:
     """Read Meta's envelope into inbound messages, and name the senders it refused.
 
@@ -146,14 +150,14 @@ def normalize_webhook(
                 # A block that names a conversation but carries no message (a shared contact card,
                 # say) still tells us who is on the other end. Only an unlisted one is refused.
                 if block_sender not in allowed_users:
-                    _refuse(refused, block_sender)
+                    _refuse(refused, block_sender, log_key)
                 continue
             for item in items:
                 if item.get("status"):
                     continue
                 sender = _wa_id(item.get("from")) or block_sender
                 if sender not in allowed_users:
-                    _refuse(refused, sender)
+                    _refuse(refused, sender, log_key)
                     continue
                 converted = _as_inbound(item, sender=sender, timezone=timezone)
                 if converted is None:
@@ -163,21 +167,24 @@ def normalize_webhook(
     return WebhookBatch(tuple(messages), tuple(declines)), tuple(refused)
 
 
-def _refuse(refused: list[str], sender: str) -> None:
+def _refuse(refused: list[str], sender: str, log_key: str) -> None:
     if sender not in refused:
-        logger.warning("refused webhook from unlisted sender %s", sender_for_log(sender))
+        logger.warning("refused webhook from unlisted sender %s", sender_for_log(sender, log_key))
         refused.append(sender)
 
 
-def sender_for_log(sender: str) -> str:
+def sender_for_log(sender: str, log_key: str = "") -> str:
     """A sender reduced to something a log can correlate without becoming a contact list.
 
     A `wa_id` is a phone number, and refusals log at the default level, so the plain value would
-    file stranger's numbers in a log that outlives the conversation. The digest is stable, so one
-    blocked sender is still recognisable across lines; the full id is on the app's own webhook
-    payload when a number needs adding to the allow-list.
+    file strangers' numbers in a log that outlives the conversation. A bare hash is not enough
+    either: ten-digit numbers are a small enough space that anyone holding the log can confirm a
+    number they already suspect by trying it. So the digest is keyed on the app secret — stable
+    across lines for one sender, and meaningless without the secret. The full id stays on the
+    webhook payload for whoever needs to add a number to the allow-list.
     """
-    return f"wa#{hashlib.sha256(sender.encode()).hexdigest()[:10]}"
+    digest = hmac.new(log_key.encode(), sender.encode(), hashlib.sha256).hexdigest()
+    return f"wa#{digest[:10]}"
 
 
 def _wa_id(value: Any) -> str | None:

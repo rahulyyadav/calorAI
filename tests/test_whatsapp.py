@@ -78,10 +78,15 @@ def _image(
 
 
 def _normalize(
-    *items: dict[str, Any], allowed: frozenset[str] = ALLOWED, **extra: Any
+    *items: dict[str, Any],
+    allowed: frozenset[str] = ALLOWED,
+    log_key: str = "",
+    **extra: Any,
 ) -> tuple[WebhookBatch, tuple[str, ...]]:
     payload = _payload(*items, **extra)
-    return normalize_webhook(payload, timezone="Asia/Kolkata", allowed_users=allowed)
+    return normalize_webhook(
+        payload, timezone="Asia/Kolkata", allowed_users=allowed, log_key=log_key
+    )
 
 
 # --- proving an event came from Meta -------------------------------------------------
@@ -337,6 +342,23 @@ def test_a_refused_sender_is_logged_without_filing_their_number(caplog) -> None:
     assert sender_for_log(STRANGER) in caplog.text
     assert sender_for_log(STRANGER) == sender_for_log(STRANGER)
     assert sender_for_log(STRANGER) != sender_for_log(SENDER)
+
+
+def test_a_refused_sender_digest_is_keyed_so_the_number_stays_unfindable(caplog) -> None:
+    """An unsalted truncation of a phone number is one dictionary away from the number itself.
+
+    The id space is small and well known, so anyone holding the log can digest the numbers they
+    already have until one matches a line. Keyed on the app secret, the same check needs a secret
+    nobody should have, and a sender still correlates with themselves inside one deployment.
+    """
+    unkeyed = hashlib.sha256(STRANGER.encode()).hexdigest()[:10]
+    with caplog.at_level(logging.WARNING, logger="calorai_agent"):
+        _normalize(_text("1 biryani", sender=STRANGER), log_key=SECRET)
+
+    assert f"wa#{unkeyed}" not in caplog.text
+    assert sender_for_log(STRANGER, SECRET) in caplog.text
+    assert sender_for_log(STRANGER, SECRET) != sender_for_log(STRANGER, "a different secret")
+    assert sender_for_log(STRANGER, SECRET) == sender_for_log(STRANGER, SECRET)
 
 
 def test_an_empty_allow_list_refuses_everyone() -> None:

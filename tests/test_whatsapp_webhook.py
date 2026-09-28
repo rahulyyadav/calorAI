@@ -40,6 +40,7 @@ from calorai_agent.whatsapp import (
     WhatsAppError,
     WhatsAppMediaSource,
     normalize_webhook,
+    sender_for_log,
 )
 from calorai_agent.whatsapp_server import (
     INTERNAL_FAILURE_REPLY,
@@ -218,6 +219,7 @@ def _app(
     vision_answer: Any = BIRYANI,
     allowed: tuple[str, ...] = (WA_USER,),
     executor: Any = None,
+    prefetcher: Any = None,
 ) -> tuple[WebhookApplication, FakeGraph]:
     client = graph if graph is not None else FakeGraph()
     # One media source, shared by the delivery that warms photos and the pipeline that reads them.
@@ -239,7 +241,7 @@ def _app(
         # Tests want the answer inside the call they just made; the production default is a worker,
         # and `test_the_production_answerer_runs_behind_the_acknowledgement` holds that open.
         executor=executor if executor is not None else InlineExecutor(),
-        media=media,
+        media=prefetcher if prefetcher is not None else media,
     )
     return application, client
 
@@ -372,13 +374,18 @@ def test_a_failed_read_receipt_does_not_cost_the_user_their_answer(
 
 def test_a_reply_that_cannot_be_sent_does_not_stop_the_meal_being_logged(
     repository: MealRepository,
+    caplog,
 ) -> None:
     application, _ = _app(repository, FakeGraph(sends_fail=True))
 
-    status, _ = _deliver(application, _text("1 idli"))
+    with caplog.at_level(logging.WARNING, logger="calorai_agent"):
+        status, _ = _deliver(application, _text("1 idli"))
 
     assert status == 200
     assert len(repository.list_for_day(WA_USER, DAY)) == 1
+    # The one line that names the failed reply names them by digest, the way a refusal does.
+    assert WA_USER not in caplog.text
+    assert sender_for_log(WA_USER, SECRET) in caplog.text
 
 
 # --- one delivery, one meal ----------------------------------------------------------
@@ -639,6 +646,60 @@ class _FieldHandler(logging.Handler):
             self.sink.append({"event": record.getMessage(), **fields})
 
 
+class _CrashingPrefetcher:
+    """A media source that raises something the shipped reader never lets escape.
+
+    `MediaCache.warm` turns every failure into a logged warning, so no photo can end a delivery
+    through it. This stands in for the one thing that still can: a `MediaPrefetcher` handed to the
+    delivery is a public seam, and whatever it throws, it throws outside the per-message safety net.
+    """
+
+    def prefetch(self, media: MediaRef) -> bool:
+        raise httpx.InvalidURL("no scheme")
+
+
+def test_a_delivery_lost_after_the_acknowledgement_names_its_trace_and_nothing_else(
+    repository: MealRepository,
+) -> None:
+    """The future's callback can only report a class name; the delivery line reports the trace.
+
+    A worker that dies behind the 200 leaves the user waiting with no retry coming, so the one line
+    that survives has to be enough to find the turn — and not enough to read the plate.
+    """
+    events: list[dict[str, Any]] = []
+
+    class _TracedHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            fields = getattr(record, FIELDS_ATTR, None)
+            if isinstance(fields, dict):
+                # Read on the emitting thread, which is the thread the delivery's scope is open on.
+                events.append({"event": record.getMessage(), "trace": current_trace(), **fields})
+
+    handler = _TracedHandler()
+    loggers = logging.getLogger("calorai_agent")
+    was = loggers.level
+    loggers.setLevel(logging.ERROR)
+    loggers.addHandler(handler)
+    try:
+        crashing, _graph = _app(repository, prefetcher=_CrashingPrefetcher())
+        with pytest.raises(httpx.InvalidURL):
+            _deliver(
+                crashing,
+                _photo(msg_id="wamid.IMG", caption="two dosas with coconut chutney"),
+            )
+    finally:
+        loggers.removeHandler(handler)
+        loggers.setLevel(was)
+
+    failed = [row for row in events if row["event"] == "delivery_failed"]
+    assert len(failed) == 1
+    assert failed[0]["error"] == "InvalidURL"
+    assert failed[0]["messages"] == 1
+    # A trace id a reviewer can grep for, and no meal text anywhere in the line.
+    assert failed[0]["trace"]
+    assert "dosa" not in repr(events).lower()
+
+
 # --- what we cannot eat, and who may send it -----------------------------------------
 
 
@@ -702,6 +763,25 @@ def test_an_unlisted_number_gets_no_reply_and_no_meal(
     assert graph.replies == []
     assert repository.list_for_day(STRANGER, DAY) == []
     assert _events(repository, STRANGER) == []
+
+
+def test_an_unlisted_sender_is_refused_by_digest_under_our_own_secret(
+    repository: MealRepository,
+    caplog,
+) -> None:
+    """The whole request thread, checked for the thing a refusal is most likely to leak.
+
+    The warning is written by the server, which holds the app secret, so the digest it files has to
+    be the keyed one: an unsalted truncation of a number anyone can guess is a lookup table, and a
+    reply that later fails has to name the same digest or the two lines are uncorrelatable.
+    """
+    unkeyed = hashlib.sha256(STRANGER.encode()).hexdigest()[:10]
+    with caplog.at_level(logging.WARNING, logger="calorai_agent"):
+        _deliver(_app(repository)[0], _text("I ate 10 biryani", sender=STRANGER))
+
+    assert STRANGER not in caplog.text
+    assert f"wa#{unkeyed}" not in caplog.text
+    assert sender_for_log(STRANGER, SECRET) in caplog.text
 
 
 def test_an_empty_allow_list_answers_nothing_at_all(

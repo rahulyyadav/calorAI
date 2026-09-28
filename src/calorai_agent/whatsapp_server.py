@@ -165,11 +165,16 @@ class WebhookApplication:
             logger.warning("acknowledged webhook body that was not a JSON object")
             return 200, "ok"
         batch, refused = normalize_webhook(
-            payload, timezone=self.timezone, allowed_users=self.allowed_users
+            payload,
+            timezone=self.timezone,
+            allowed_users=self.allowed_users,
+            log_key=self.app_secret,
         )
         for sender in refused:
             logger.warning(
-                "ignored %s message(s) from unlisted sender %s", CHANNEL, sender_for_log(sender)
+                "ignored %s message(s) from unlisted sender %s",
+                CHANNEL,
+                sender_for_log(sender, self.app_secret),
             )
         if not batch.empty:
             self.executor.submit(lambda: self.deliver(batch))
@@ -178,8 +183,23 @@ class WebhookApplication:
     def deliver(self, batch: WebhookBatch) -> None:
         """Everything that happens behind the acknowledgement, on one thread and under one trace."""
         with trace_scope():
-            self.prefetch(batch)
-            self.answer(batch)
+            try:
+                self.prefetch(batch)
+                self.answer(batch)
+            except Exception as error:
+                # The worker's future can only name the exception class, because the callback runs
+                # on a different thread with no trace of its own. This line has both: the trace this
+                # delivery is running under, and how many messages went unanswered. Only the class
+                # is recorded — an exception message can quote the meal it failed on.
+                log_event(
+                    logger,
+                    "delivery_failed",
+                    level=logging.ERROR,
+                    error=type(error).__name__,
+                    messages=len(batch.messages),
+                    declined=len(batch.declines),
+                )
+                raise
 
     def prefetch(self, batch: WebhookBatch) -> None:
         """Download the delivery's photos together, before any turn asks for its own.
@@ -308,7 +328,9 @@ class WebhookApplication:
         try:
             self.client.send_text(to, body)
         except WhatsAppError as error:
-            logger.error("reply to %s failed: %s", sender_for_log(to), error)
+            # The same keyed digest the refusal path uses, so one sender correlates across lines —
+            # and an enumerable phone number never appears in a log at all.
+            logger.error("reply to %s failed: %s", sender_for_log(to, self.app_secret), error)
 
 
 def _one(query: Mapping[str, list[str]], name: str) -> str | None:

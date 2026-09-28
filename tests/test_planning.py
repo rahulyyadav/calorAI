@@ -335,6 +335,57 @@ def test_a_question_about_the_record_lists_it_instead_of_logging_what_it_asked_a
     assert parsed.draft is None
 
 
+def test_an_amount_inside_a_yes_no_question_is_still_only_a_question() -> None:
+    """The amount belongs to the question, so it is not a claim: "did i eat 2 parathas today?".
+
+    An earlier guard refused to treat a question as a read whenever the message spelled out a
+    quantity, which fixed the log-that-looked-like-a-question case and opened this one: the meal
+    the user was asking whether they had eaten got logged as though they had said they did.
+    """
+    planner = RuleBasedPlanner()
+
+    for text in ("did I eat 2 parathas today?", "did i have 2 eggs for breakfast?"):
+        parsed = planner.parse(_request(text))
+
+        assert parsed.intent is AgentIntent.LIST_MEALS, text
+        assert parsed.draft is None, text
+        assert planner.deterministic_read(_request(text)) is not None
+
+
+def test_a_meal_stated_beside_a_question_is_not_dropped_for_lacking_a_number() -> None:
+    """A claim needs a food, not an amount: a bare 'i also had eggs' is still a meal."""
+    parsed = RuleBasedPlanner().parse(
+        _request("what did I eat today? i also had eggs for breakfast")
+    )
+    assert parsed.intent is AgentIntent.LOG_MEAL
+    assert parsed.draft is not None
+    assert [(item.name, item.quantity) for item in parsed.draft.items] == [("egg", Decimal("1"))]
+
+
+def test_a_clause_after_a_comma_counts_as_a_claim_and_a_decimal_stays_one_number() -> None:
+    """Clause boundaries are where a person stopped asking, and a decimal is not two amounts."""
+    planner = RuleBasedPlanner()
+
+    stated = planner.parse(_request("i had biryani, did i have enough protein?"))
+    assert stated.intent is AgentIntent.LOG_MEAL
+    assert stated.draft is not None
+    assert stated.draft.items[0].name == "biryani"
+
+    decimal = planner.parse(_request("what did i eat today? i ate 1.5 cups of rice"))
+    assert decimal.intent is AgentIntent.LOG_MEAL
+    assert decimal.draft is not None
+    assert decimal.draft.items[0].quantity == Decimal("1.5")
+
+
+def test_an_opening_verb_is_not_a_question() -> None:
+    """An opening past-tense verb is the most ordinary log there is, not an inquiry."""
+    parsed = RuleBasedPlanner().parse(_request("had 2 parathas for breakfast"))
+
+    assert parsed.intent is AgentIntent.LOG_MEAL
+    assert parsed.draft is not None
+    assert parsed.draft.items[0].quantity == Decimal("2")
+
+
 def test_yesterday_meal_is_stamped_on_yesterday() -> None:
     parsed = RuleBasedPlanner().parse(_request("had 2 eggs for dinner yesterday"))
 

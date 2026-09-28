@@ -405,20 +405,51 @@ def _is_totals_question(text: str) -> bool:
 
 
 def _is_list_question(text: str) -> bool:
-    return any(phrase in text for phrase in LIST_QUESTION_PHRASES) and not _states_a_portion(text)
+    return _asks_about_the_record(text) and not _claims_a_meal(text)
 
 
-def _states_a_portion(text: str) -> bool:
-    """True when a message claims a meal with an amount, even while asking for the list.
+def _asks_about_the_record(text: str) -> bool:
+    return any(phrase in text for phrase in LIST_QUESTION_PHRASES)
 
-    A question can carry a log: "what did i eat today? i also had 2 parathas" wants both answers,
-    and reading it as only the question loses the parathas without saying so. The totals read can
-    refuse any food name because its answer is a number, but a list answer is a list of food names,
-    so a bare food inside the question ("did i eat biryani") is a reference to the record rather
-    than a new claim. Only an amount the user spelled out makes the message a meal, and an amount
-    too large to believe belongs on the log path, where it is refused out loud instead of dropped.
+
+# A question mark is the boundary the user actually typed. Splitting on it is what lets
+# "what did i eat today? i also had 2 parathas" be read as a question *and* a claim instead of
+# only one of them. A comma or period counts only when real text follows, so "1.5 cups" is not
+# cut in half and a trailing comma does not manufacture an empty clause.
+_CLAUSE_BOUNDARY = re.compile(r"[?!]|\.(?=\s)|,(?=\s)|\n")
+
+# Openers that ask about the record without a listed phrase, "did i eat enough protein" being the
+# common one. Deliberately excludes "had" and "have" as first words: "had 2 idli for breakfast" is
+# the single most ordinary log this application receives.
+_QUESTION_OPENERS = ("did ", "do ", "does ", "what ", "when ", "where ", "who ", "how ", "why ")
+
+
+def _declarations(text: str) -> list[str]:
+    """The parts of a message that state something rather than ask about the record."""
+    clauses = [clause.strip() for clause in _CLAUSE_BOUNDARY.split(text) if clause.strip()]
+    return [
+        clause
+        for clause in clauses
+        if not any(phrase in clause for phrase in LIST_QUESTION_PHRASES)
+        and not clause.lower().startswith(_QUESTION_OPENERS)
+    ]
+
+
+def _claims_a_meal(text: str) -> bool:
+    """True when a part of the message states a meal instead of asking about one.
+
+    An amount is not needed to make a claim: "what did i eat today? i also had eggs" asks and
+    states at once, and reading it as only the question drops the eggs in silence. A claimed food
+    with no quantity belongs on the log path, where the missing amount is asked about out loud,
+    and an amount too large to believe belongs there too, where it is refused out loud. A food
+    named *inside* the question ("did i eat 2 parathas today?") is a reference to the record, not
+    a new claim, and answering it by logging would invent the meal the user is asking about.
     """
-    return any(mention.explicit for mention in mentions_in(text).values() if not mention.denied)
+    return any(
+        not mention.denied
+        for clause in _declarations(text)
+        for mention in mentions_in(clause).values()
+    )
 
 
 def _pure_read(text: str) -> ParsedMessage | None:

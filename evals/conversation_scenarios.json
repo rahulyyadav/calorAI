@@ -363,6 +363,33 @@
         "meals": { "0": 0 },
         "totals": { "0": { "kcal": "0" } }
       }
+    },
+    {
+      "name": "adversarial: an amount inside a yes/no question is still only a question",
+      "claim": "the clause that asks is read as asking even when it carries a portion",
+      "turns": [
+        { "text": "did i eat 2 parathas today?" },
+        { "text": "what did i eat today?" }
+      ],
+      "expect": {
+        "routes": ["list_meals", "list_meals"],
+        "meals": { "0": 0 },
+        "totals": { "0": { "kcal": "0" } }
+      }
+    },
+    {
+      "name": "adversarial: a meal stated beside a question is logged without a number",
+      "claim": "question and declaration are separate clauses; the declaration writes",
+      "turns": [
+        { "text": "what did I eat today? i also had eggs for breakfast" },
+        { "text": "how many calories have i eaten today?" }
+      ],
+      "expect": {
+        "routes": ["log_meal", "get_totals"],
+        "meals": { "0": 1 },
+        "meal_items": { "0": [["egg"]] },
+        "meal_quantities": { "0": [["1"]] }
+      }
     }
   ]
 }

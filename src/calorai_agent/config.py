@@ -44,6 +44,21 @@ def _int_env(name: str, *, default: int) -> int:
         return default
 
 
+def _bool_env(name: str, *, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _float_env(name: str, *, default: float) -> float:
+    value = os.getenv(name)
+    try:
+        return float(value) if value else default
+    except ValueError:
+        return default
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     database_path: Path
@@ -66,6 +81,12 @@ class Settings:
     webhook_host: str = "127.0.0.1"
     webhook_port: int = 8080
     webhook_path: str = "/webhook"
+    log_format: str = "text"
+    # Quiet by default: a CLI that prints its own trace between every reply is a CLI that gets
+    # `CALORAI_LOG_LEVEL=WARNING` in the README. The webhook raises this to INFO in its own main().
+    log_level: str = "WARNING"
+    tracing: bool = False
+    tracing_project: str = "calorai"
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -101,6 +122,11 @@ class Settings:
             webhook_host=_env("CALORAI_WEBHOOK_HOST", default="127.0.0.1"),
             webhook_port=_int_env("CALORAI_WEBHOOK_PORT", default=8080),
             webhook_path=_env("CALORAI_WEBHOOK_PATH", default="/webhook"),
+            request_timeout_seconds=_float_env("CALORAI_REQUEST_TIMEOUT_SECONDS", default=20.0),
+            log_format=_env("CALORAI_LOG_FORMAT", default="text"),
+            log_level=_env("CALORAI_LOG_LEVEL", default="WARNING"),
+            tracing=_bool_env("CALORAI_TRACING"),
+            tracing_project=_env("CALORAI_TRACING_PROJECT", default="calorai"),
         )
 
     @property

@@ -22,6 +22,7 @@ from calorai_agent.domain import (
 )
 from calorai_agent.memory import context_lines, normalized_diet
 from calorai_agent.nutrition import FOODS, lookup
+from calorai_agent.observability import log_event
 from calorai_agent.planning import PlannerRequest, RuleBasedPlanner, local_time, routine_log
 from calorai_agent.policy import MAX_PLAUSIBLE_QUANTITY, UNUSABLE_QUANTITY_CONFIDENCE
 from calorai_agent.providers import ModelProviderError, TextModelClient, parse_json_object
@@ -111,6 +112,13 @@ class ModelPlanner:
         self._fallback = RuleBasedPlanner()
 
     def parse(self, request: PlannerRequest) -> ParsedMessage:
+        # The fastest model call is the one a totals question never makes. The rules read the
+        # same words and the answer comes out of the database either way, so billing a model to
+        # notice "how am I doing today?" is a round trip of latency on the most common message.
+        read = self._fallback.deterministic_read(request)
+        if read is not None:
+            log_event(logger, "planner_fast_path", kind=read.intent.value, chars=len(request.text))
+            return read
         try:
             raw = self.client.complete(
                 system=SYSTEM_PROMPT.format(foods=", ".join(sorted(FOODS))),

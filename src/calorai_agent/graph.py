@@ -4,7 +4,7 @@ import hashlib
 import logging
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta
-from typing import NotRequired, TypedDict
+from typing import Any, NotRequired, TypedDict
 from zoneinfo import ZoneInfo
 
 from langgraph.graph import END, START, StateGraph
@@ -33,6 +33,7 @@ from calorai_agent.memory import (
     current_diet,
     targets,
 )
+from calorai_agent.observability import span, trace_scope
 from calorai_agent.planning import MEAL_TIMES, MessagePlanner, PlannerRequest
 from calorai_agent.policy import AmbiguityPolicy, LogDecision
 from calorai_agent.resolution import MealReferenceResolver, Resolution, ResolutionStatus
@@ -192,6 +193,12 @@ class MealAgent:
 
     def handle(self, inbound: InboundMessage) -> str:
         """Process one inbound message exactly once, even when it is redelivered."""
+        # One id for the whole turn, and one line saying how long it took and where it went. The
+        # message text is deliberately absent: this is a log about health data, not a copy of it.
+        with trace_scope(), span(logger, "turn", channel=inbound.channel) as report:
+            return self._answer(inbound, report)
+
+    def _answer(self, inbound: InboundMessage, report: dict[str, Any]) -> str:
         event = self.tools.record_inbound(
             RecordInboundInput(
                 user_id=inbound.user_id,
@@ -200,10 +207,14 @@ class MealAgent:
                 channel=inbound.channel,
             )
         )
+        report["redelivered"] = not event.created
         if not event.created:
+            report["route"] = "replayed"
             return self._replay(event.id, event.response_text, inbound.timezone)
 
-        response = self._run(inbound, event.id)
+        response, route = self._run(inbound, event.id)
+        report["route"] = route
+        report["photo"] = inbound.media is not None
         self.tools.complete_inbound(event.id, response)
         return response
 
@@ -226,7 +237,8 @@ class MealAgent:
                 return responses.deleted(meal)
         raise AssertionError(f"unhandled outcome kind {outcome.kind!r}")
 
-    def _run(self, inbound: InboundMessage, event_id: str) -> str:
+    def _run(self, inbound: InboundMessage, event_id: str) -> tuple[str, str]:
+        """Run one turn, and report which node answered it so a log line explains the latency."""
         now = inbound.received_at or datetime.now(ZoneInfo(inbound.timezone))
         result = self._graph.invoke(
             {
@@ -241,7 +253,10 @@ class MealAgent:
         response = result.get("response")
         if not isinstance(response, str):
             raise RuntimeError("agent graph completed without a response")
-        return response
+        parsed = result.get("parsed")
+        # A photo the transport could not read never reaches a plan, so there is no intent to name.
+        route = parsed.intent.value if isinstance(parsed, ParsedMessage) else "no_tool"
+        return response, route
 
     def _gather_context(self, state: AgentState) -> dict[str, object]:
         today = _local_day(state["now"], state["timezone"])

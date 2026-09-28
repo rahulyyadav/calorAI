@@ -58,11 +58,13 @@ def test_model_items_get_reference_nutrition_not_model_math() -> None:
 
 
 def test_prompt_offers_the_reference_food_list_and_recent_meals() -> None:
+    # A plain totals question never reaches the model at all now, so the prompt is rendered for
+    # a message that genuinely needs interpreting.
     planner, client = _planner({"intent": "get_totals"})
 
     planner.parse(
         PlannerRequest(
-            text="how am I doing",
+            text="leftover biryani, maybe two thirds of the box",
             occurred_at=NOW,
             timezone="UTC",
             recent_meals=(),

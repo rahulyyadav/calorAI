@@ -287,6 +287,15 @@ def test_amount_that_matches_no_food_lowers_confidence() -> None:
     assert parsed.draft.items[0].confidence == UNUSABLE_QUANTITY_CONFIDENCE
 
 
+def test_an_article_naming_an_occasion_is_not_read_as_a_second_portion() -> None:
+    parsed = RuleBasedPlanner().parse(_request("had a banana for a snack"))
+
+    assert parsed.draft is not None
+    assert parsed.draft.items[0].name == "banana"
+    assert parsed.draft.items[0].quantity == Decimal("1")
+    assert parsed.draft.items[0].confidence == 0.8
+
+
 def test_yesterday_meal_is_stamped_on_yesterday() -> None:
     parsed = RuleBasedPlanner().parse(_request("had 2 eggs for dinner yesterday"))
 

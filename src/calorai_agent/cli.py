@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-from calorai_agent.app import create_agent
+from calorai_agent.app import create_agent, prepare_runtime
 from calorai_agent.config import Settings
 from calorai_agent.domain import InboundMessage, MediaRef
 
@@ -27,6 +27,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("auto", "deterministic", "model"),
         help="Override CALORAI_PLANNER (deterministic needs no API key)",
     )
+    parser.add_argument(
+        "--logs",
+        choices=("DEBUG", "INFO", "WARNING"),
+        help="Show the structured trace on stderr instead of only the reply (default: WARNING)",
+    )
     return parser
 
 
@@ -35,11 +40,14 @@ def main() -> None:
     settings = Settings.from_env()
     user_id = args.user or settings.default_user_id
     timezone = args.timezone or settings.default_timezone
-    settings = replace(
-        settings,
-        default_user_id=user_id,
-        default_timezone=timezone,
-        planner=args.planner or settings.planner,
+    settings = prepare_runtime(
+        replace(
+            settings,
+            default_user_id=user_id,
+            default_timezone=timezone,
+            planner=args.planner or settings.planner,
+            log_level=args.logs or settings.log_level,
+        )
     )
 
     agent = create_agent(settings)

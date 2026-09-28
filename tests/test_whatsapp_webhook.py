@@ -31,7 +31,7 @@ from calorai_agent.planning import RuleBasedPlanner
 from calorai_agent.repository import MealRepository
 from calorai_agent.tools import MealTools
 from calorai_agent.vision import VisionInterpreter
-from calorai_agent.whatsapp import GraphClient, WhatsAppError, WhatsAppMediaSource
+from calorai_agent.whatsapp import GraphClient, MediaCache, WhatsAppError, WhatsAppMediaSource
 from calorai_agent.whatsapp_server import (
     INTERNAL_FAILURE_REPLY,
     InlineExecutor,
@@ -78,6 +78,7 @@ class FakeGraph(GraphClient):
         downloads_fail: bool = False,
         sends_fail: bool = False,
         receipts_fail: bool = False,
+        delay: float = 0.0,
     ) -> None:
         super().__init__(
             access_token="token", phone_number_id="1000", base_url="https://graph.test"
@@ -86,6 +87,7 @@ class FakeGraph(GraphClient):
         self.downloads_fail = downloads_fail
         self.sends_fail = sends_fail
         self.receipts_fail = receipts_fail
+        self.delay = delay
         self.replies: list[tuple[str, str]] = []
         self.statuses: list[str] = []
         self.receipt_ids: list[str] = []
@@ -104,10 +106,19 @@ class FakeGraph(GraphClient):
 
     def download(self, media_id: str) -> bytes:
         self.download_calls.append(media_id)
+        if self.delay:
+            time.sleep(self.delay)
         if self.downloads_fail:
             raise WhatsAppError(f"media {media_id} came back with no download url")
         assert self.photo is not None
         return self.photo
+
+
+class SlowGraph(FakeGraph):
+    """A Graph API that takes a while to hand a photo over, which is the normal one."""
+
+    def __init__(self, delay: float = 0.2) -> None:
+        super().__init__(delay=delay)
 
 
 class SpyVision:
@@ -169,9 +180,13 @@ def _text(body: str, *, msg_id: str = "wamid.TXT", sender: str = WA_USER) -> dic
 
 
 def _photo(
-    *, msg_id: str = "wamid.IMG", caption: str = "", sender: str = WA_USER
+    *,
+    msg_id: str = "wamid.IMG",
+    caption: str = "",
+    sender: str = WA_USER,
+    media_id: str = "media-1",
 ) -> dict[str, Any]:
-    image: dict[str, Any] = {"id": "media-1"}
+    image: dict[str, Any] = {"id": media_id}
     if caption:
         image["caption"] = caption
     return {"from": sender, "id": msg_id, "timestamp": str(TS), "type": "image", "image": image}
@@ -191,9 +206,9 @@ def _app(
     executor: Any = None,
 ) -> tuple[WebhookApplication, FakeGraph]:
     client = graph if graph is not None else FakeGraph()
-    vision = VisionInterpreter(
-        SpyVision(vision_answer), WhatsAppMediaSource(client), model="vision-test"
-    )
+    # One media source, shared by the delivery that warms photos and the pipeline that reads them.
+    media = WhatsAppMediaSource(client, cache=MediaCache())
+    vision = VisionInterpreter(SpyVision(vision_answer), media, model="vision-test")
     agent = MealAgent(
         planner if planner is not None else RuleBasedPlanner(),
         MealTools(repository),
@@ -210,6 +225,7 @@ def _app(
         # Tests want the answer inside the call they just made; the production default is a worker,
         # and `test_the_production_answerer_runs_behind_the_acknowledgement` holds that open.
         executor=executor if executor is not None else InlineExecutor(),
+        media=media,
     )
     return application, client
 
@@ -461,6 +477,61 @@ def test_a_caption_beside_the_photo_is_read_as_a_description_of_the_plate(
     meal = repository.list_for_day(WA_USER, DAY)[0]
     assert str(meal.items[0].quantity) == "0.75"
     assert "half" in graph.replies[0][1].lower() or "0.75" in graph.replies[0][1]
+
+
+def test_two_photos_in_one_delivery_are_downloaded_while_the_first_is_still_reading(
+    repository: MealRepository,
+) -> None:
+    """Photos are fetched side by side, because waiting for them in turn is lost latency.
+
+    Each plate is then read on its own user's thread in order, so a correction can never arrive
+    before the meal it corrects. What overlaps is the part with no conversation in it: the bytes.
+    """
+    application, graph = _app(repository, SlowGraph(0.2))
+
+    started = time.perf_counter()
+    _deliver(
+        application,
+        _photo(msg_id="wamid.A", media_id="media-1", caption="my lunch"),
+        _photo(msg_id="wamid.B", media_id="media-2", caption="my dinner"),
+    )
+    elapsed = time.perf_counter() - started
+
+    assert sorted(graph.download_calls) == ["media-1", "media-2"]
+    assert len(repository.list_for_day(WA_USER, DAY)) == 2
+    # Two round trips back to back would have cost at least 0.4 seconds.
+    assert elapsed < 0.35
+
+
+def test_a_photo_one_message_downloaded_is_not_paid_for_twice(
+    repository: MealRepository,
+) -> None:
+    application, graph = _app(repository)
+
+    _deliver(application, _photo(msg_id="wamid.A"), _photo(msg_id="wamid.B"))
+
+    assert graph.download_calls == ["media-1"]
+    assert len(repository.list_for_day(WA_USER, DAY)) == 2
+
+
+def test_a_photo_that_will_not_warm_still_tells_the_user_the_truth(
+    repository: MealRepository,
+) -> None:
+    """A failed prefetch is not a failure: the turn fetches again and answers truthfully."""
+    application, graph = _app(repository, FakeGraph(downloads_fail=True))
+
+    _deliver(application, _photo())
+
+    assert graph.download_calls == ["media-1", "media-1"]
+    assert "could not be downloaded" in graph.replies[0][1].lower()
+
+
+def test_a_text_delivery_warms_nothing_at_all(repository: MealRepository) -> None:
+    application, graph = _app(repository)
+
+    _deliver(application, _text("had two dosas"))
+
+    assert graph.download_calls == []
 
 
 # --- what we cannot eat, and who may send it -----------------------------------------

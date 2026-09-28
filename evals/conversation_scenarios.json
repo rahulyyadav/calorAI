@@ -1,0 +1,339 @@
+{
+  "comment": "Phase 6c conversation evals. The first eleven scenarios are the test conversation set from the brief, quoted as the users actually wrote them; the rest are the cases that break agents. Every scenario runs on the deterministic planner and a scripted vision answer, so it needs no API key, no network and no luck: a failure here is the application's judgement, not a model's mood. docs/EVALS.md defines what 'correct' means for each field.",
+  "scenarios": [
+    {
+      "name": "supplied: a plain breakfast becomes one meal with a number",
+      "claim": "conversation quality + data correctness",
+      "turns": [{ "text": "had 2 parathas and chai for breakfast" }],
+      "expect": {
+        "routes": ["log_meal"],
+        "asks": [false],
+        "meals": { "0": 1 },
+        "meal_items": { "0": [["paratha", "milk chai"]] },
+        "meal_quantities": { "0": [["2", "1"]] },
+        "totals": { "0": { "kcal": "640", "protein_g": "15" } },
+        "turn_contains": ["640 kcal and 15g protein"]
+      }
+    },
+    {
+      "name": "supplied: a hedged portion is logged as a disclosed estimate",
+      "claim": "multi-turn ambiguity handling: log it, but say it is an estimate",
+      "turns": [{ "text": "leftover biryani, maybe two thirds of the box" }],
+      "expect": {
+        "routes": ["log_meal"],
+        "asks": [false],
+        "meals": { "0": 1 },
+        "meal_items": { "0": [["biryani"]] },
+        "meal_quantities": { "0": [["0.6666666666666666666666666667"]] },
+        "totals": { "0": { "kcal": "400" } },
+        "turn_contains": ["That is an estimate"]
+      }
+    },
+    {
+      "name": "supplied: grazing is asked about instead of invented",
+      "claim": "under-asking produces garbage data",
+      "turns": [{ "text": "skipped lunch but grazed all afternoon" }],
+      "expect": {
+        "routes": ["clarify"],
+        "asks": [true],
+        "meals": { "0": 0 },
+        "turn_contains": ["graze"]
+      }
+    },
+    {
+      "name": "supplied: same as yesterday repeats yesterday, not today",
+      "claim": "memory, not parsing: a new session has to resolve the pointer",
+      "turns": [
+        { "text": "had 2 rotis and dal for lunch" },
+        { "text": "same as yesterday", "day": 1, "new_session": true }
+      ],
+      "expect": {
+        "routes": ["log_meal", "repeat_meal"],
+        "asks": [false, false],
+        "meals": { "0": 1, "1": 1 },
+        "meal_items": { "1": [["roti", "dal"]] },
+        "totals": { "1": { "kcal": "420", "protein_g": "18" } },
+        "turn_contains": [null, "the same as yesterday"]
+      }
+    },
+    {
+      "name": "supplied: a correction updates the meal instead of adding one",
+      "claim": "the brief's separating case: totals move, meal count does not",
+      "turns": [
+        { "text": "had 2 rotis for lunch" },
+        { "text": "actually that was 3 rotis not 2" }
+      ],
+      "expect": {
+        "routes": ["log_meal", "revise_meal"],
+        "asks": [false, false],
+        "meals": { "0": 1 },
+        "meal_items": { "0": [["roti"]] },
+        "meal_quantities": { "0": [["3"]] },
+        "totals": { "0": { "kcal": "360", "protein_g": "12" } },
+        "turn_contains": [null, "3 roti"]
+      }
+    },
+    {
+      "name": "supplied: a protein question reads the day it already holds",
+      "claim": "tool choice: totals, not a lookup and not a new meal",
+      "turns": [
+        { "text": "had 2 parathas and chai for breakfast" },
+        { "text": "how much protein have I had today?" }
+      ],
+      "expect": {
+        "routes": ["log_meal", "get_totals"],
+        "asks": [false, false],
+        "meals": { "0": 1 },
+        "turn_contains": [null, "15g protein"]
+      }
+    },
+    {
+      "name": "supplied: a calories question answers with the running total",
+      "claim": "running daily totals, correct after every meal",
+      "turns": [
+        { "text": "had 2 parathas and chai for breakfast" },
+        { "text": "how am I doing on calories?" },
+        { "text": "had a banana" },
+        { "text": "how am I doing on calories?", "at": "2026-09-26T13:05:00+00:00" }
+      ],
+      "expect": {
+        "routes": ["log_meal", "get_totals", "log_meal", "get_totals"],
+        "asks": [false, false, false, false],
+        "meals": { "0": 2 },
+        "totals": { "0": { "kcal": "745" } },
+        "turn_contains": [null, "640 kcal", null, "745 kcal"]
+      }
+    },
+    {
+      "name": "supplied: a photo of a plate logs one meal",
+      "claim": "image input on a separate model, and the table prices it",
+      "vision_answer": {
+        "items": [
+          { "name": "biryani", "quantity": "1.5", "confidence": 0.92, "alternative": null },
+          { "name": "curd", "quantity": "0.5", "confidence": 0.85, "alternative": null }
+        ],
+        "unclear": null
+      },
+      "turns": [{ "text": "", "photo": "plate" }],
+      "expect": {
+        "routes": ["log_meal"],
+        "asks": [false],
+        "meals": { "0": 1 },
+        "vision_calls": 1,
+        "meal_items": { "0": [["biryani", "curd"]] },
+        "totals": { "0": { "kcal": "960", "protein_g": "37" } },
+        "turn_contains": ["I read that off your photo"]
+      }
+    },
+    {
+      "name": "supplied: a photo and its caption fuse into one halved meal",
+      "claim": "the brief's third separating case: two models, one meal",
+      "vision_answer": {
+        "items": [
+          { "name": "biryani", "quantity": "1.5", "confidence": 0.92, "alternative": null },
+          { "name": "curd", "quantity": "0.5", "confidence": 0.85, "alternative": null }
+        ],
+        "unclear": null
+      },
+      "turns": [{ "text": "half of this was my brother's", "photo": "plate" }],
+      "expect": {
+        "routes": ["log_meal"],
+        "asks": [false],
+        "meals": { "0": 1 },
+        "vision_calls": 1,
+        "meal_items": { "0": [["biryani", "curd"]] },
+        "meal_quantities": { "0": [["0.75", "0.25"]] },
+        "totals": { "0": { "kcal": "480" } },
+        "turn_contains": ["I counted half of the plate"]
+      }
+    },
+    {
+      "name": "supplied: my usual replays the saved routine",
+      "claim": "memory that is written on purpose and retrieved by name",
+      "turns": [
+        { "text": "had poha for breakfast" },
+        { "text": "remember this as my usual breakfast" },
+        { "text": "my usual", "new_session": true }
+      ],
+      "expect": {
+        "routes": ["log_meal", "save_memory", "log_meal"],
+        "asks": [false, false, false],
+        "meals": { "0": 2 },
+        "memories": ["named_routine"],
+        "meal_items": { "0": [["poha"], ["poha"]] },
+        "totals": { "0": { "kcal": "500" } },
+        "turn_contains": [null, "usual breakfast", "Logged 1 poha"]
+      }
+    },
+    {
+      "name": "supplied: a stated diet is remembered and used in the next reply",
+      "claim": "memory is selective and actually reaches the response",
+      "turns": [{ "text": "i'm vegetarian btw" }, { "text": "had chicken biryani for lunch" }],
+      "expect": {
+        "routes": ["save_memory", "log_meal"],
+        "asks": [false, false],
+        "meals": { "0": 1 },
+        "memories": ["dietary_constraint"],
+        "meal_items": { "0": [["chicken", "biryani"]] },
+        "turn_contains": [null, "chicken is not vegetarian"]
+      }
+    },
+    {
+      "name": "adversarial: a correction with nothing to correct invents no meal",
+      "claim": "no phantom revision",
+      "turns": [{ "text": "actually that was 4 rotis not 2" }],
+      "expect": {
+        "routes": ["revise_meal"],
+        "meals": { "0": 0 },
+        "totals": { "0": { "kcal": "0" } },
+        "turn_contains": ["couldn't find"]
+      }
+    },
+    {
+      "name": "adversarial: same as yesterday with an empty yesterday",
+      "claim": "an unresolvable pointer asks rather than logging garbage",
+      "turns": [{ "text": "same as yesterday" }],
+      "expect": {
+        "routes": ["repeat_meal"],
+        "asks": [false],
+        "meals": { "0": 0 },
+        "turn_contains": ["couldn't find a logged meal"]
+      }
+    },
+    {
+      "name": "adversarial: my usual with no routine saved asks to establish one",
+      "claim": "no invented breakfast",
+      "turns": [{ "text": "my usual" }],
+      "expect": {
+        "routes": ["clarify"],
+        "asks": [true],
+        "meals": { "0": 0 },
+        "turn_contains": ["What is your usual"]
+      }
+    },
+    {
+      "name": "adversarial: totals on an empty day answer zero and log nothing",
+      "claim": "a read tool never mutates",
+      "turns": [{ "text": "how am I doing on calories?" }],
+      "expect": {
+        "routes": ["get_totals"],
+        "asks": [false],
+        "meals": { "0": 0 },
+        "turn_contains": ["Nothing logged today yet"]
+      }
+    },
+    {
+      "name": "adversarial: the same delivery twice logs one meal and repeats the reply",
+      "claim": "exactly-once inbound handling",
+      "turns": [{ "text": "had 2 rotis for lunch", "redeliver": true }],
+      "expect": {
+        "routes": ["log_meal", "replayed"],
+        "meals": { "0": 1 },
+        "totals": { "0": { "kcal": "240" } }
+      }
+    },
+    {
+      "name": "adversarial: a photo the model cannot read logs nothing",
+      "claim": "vision uncertainty is surfaced, never guessed",
+      "vision_answer": { "items": [], "unclear": "a hand in front of the lens" },
+      "turns": [{ "text": "", "photo": "blurred" }],
+      "expect": {
+        "routes": ["clarify"],
+        "asks": [true],
+        "meals": { "0": 0 },
+        "vision_calls": 1,
+        "turn_contains": ["could not make a meal out of that photo"]
+      }
+    },
+    {
+      "name": "adversarial: an amount past the plausible range is asked about",
+      "claim": "a misparse does not become a 6000 kcal day",
+      "turns": [{ "text": "i ate 50 rotis for dinner" }],
+      "expect": {
+        "routes": ["log_meal"],
+        "asks": [true],
+        "meals": { "0": 0 },
+        "turn_contains": ["Roughly how much did you have"]
+      }
+    },
+    {
+      "name": "adversarial: a food with no reference row is dropped, never invented",
+      "claim": "no model-invented nutrition reaches the database; the deterministic planner under-counts rather than guessing a number (docs/EVALS.md: the model planner names what it could not price instead)",
+      "turns": [{ "text": "had a protein bar and a smoothie" }],
+      "expect": {
+        "routes": ["log_meal"],
+        "asks": [false],
+        "meals": { "0": 1 },
+        "meal_items": { "0": [["smoothie"]] },
+        "totals": { "0": { "kcal": "220" } }
+      }
+    },
+    {
+      "name": "adversarial: a diet stated beside a meal keeps the diet and asks about the meal",
+      "claim": "one turn can carry two intents; only one of them writes",
+      "turns": [{ "text": "i'm vegetarian btw, also had 2 rotis" }],
+      "expect": {
+        "routes": ["save_memory"],
+        "meals": { "0": 0 },
+        "memories": ["dietary_constraint"],
+        "turn_contains": ["I did not log 2 roti"]
+      }
+    },
+    {
+      "name": "adversarial: a nutrition question about a food is not a totals request",
+      "claim": "tool choice: it refuses rather than answering from the wrong tool",
+      "turns": [{ "text": "how many calories are in a paratha" }],
+      "expect": {
+        "routes": ["unknown"],
+        "asks": [false],
+        "meals": { "0": 0 },
+        "turn_contains": ["I can total the meals you have logged"]
+      }
+    },
+    {
+      "name": "adversarial: a saved protein target still works in a fresh session",
+      "claim": "memory survives restarts and shapes the totals reply",
+      "turns": [
+        { "text": "i'm targeting 140g of protein" },
+        { "text": "had 2 parathas and chai for breakfast" },
+        { "text": "how am I doing on calories?", "new_session": true }
+      ],
+      "expect": {
+        "routes": ["save_memory", "log_meal", "get_totals"],
+        "meals": { "0": 1 },
+        "memories": ["nutrition_target"],
+        "totals": { "0": { "kcal": "640", "protein_g": "15" } },
+        "turn_contains": [null, null, "Against your targets: 15 of 140 g protein"]
+      }
+    },
+    {
+      "name": "adversarial: a deletion reopens the day and totals follow it",
+      "claim": "totals stay correct through deletions, not just additions",
+      "turns": [
+        { "text": "had 2 rotis and dal for lunch" },
+        { "text": "had a banana for a snack" },
+        { "text": "delete my lunch" }
+      ],
+      "expect": {
+        "routes": ["log_meal", "log_meal", "delete_meal"],
+        "meals": { "0": 1 },
+        "meal_items": { "0": [["banana"]] },
+        "totals": { "0": { "kcal": "105" } },
+        "turn_contains": [null, null, "Removed"]
+      }
+    },
+    {
+      "name": "adversarial: a late-night meal lands on the user's day, not the server's",
+      "claim": "session isolation and timezone correctness for a second user",
+      "timezone": "Asia/Kolkata",
+      "start": "2026-09-26T23:30:00+05:30",
+      "turns": [{ "text": "had 2 rotis and dal for dinner" }, { "text": "how am I doing on calories?" }],
+      "expect": {
+        "routes": ["log_meal", "get_totals"],
+        "meals": { "0": 1 },
+        "totals": { "0": { "kcal": "420" } },
+        "turn_contains": [null, "Today: 420 kcal"]
+      }
+    }
+  ]
+}

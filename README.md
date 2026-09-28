@@ -9,17 +9,25 @@ This repository deliberately separates the **agent core** from its delivery chan
 
 ## Current status
 
-Phases 0 to 4 are complete. The repository contains a locally runnable LangGraph vertical slice with SQLite persistence, deterministic nutrition reference data, typed meal tools, timezone-correct daily totals, and a CLI. Corrections are written as immutable meal revisions inside one transaction, ambiguous requests ask one focused question instead of guessing, refusals and impossible portions never reach a persisted row, and retried inbound messages are answered from an exactly-once event ledger. A text-model planner implements the same interface as the deterministic one and falls back to it on any unusable output, so the slice still runs without API keys. Memory survives a restart as typed records with confidence and provenance: a stated diet shapes later log replies, a protein or calorie target turns totals into progress, and `my usual` replays a saved routine as a new meal. A changed fact supersedes the one it replaces instead of contradicting it, and retrieval is bounded per kind — one diet, one target per nutrient, a few routines — so no saved habit can evict the facts every reply depends on. A photo takes its own path: bytes are checked against their signature before anything is billed, a dedicated vision model reports only the foods and portions it can separate, and the application prices every line from the reference table, so no model's calorie guess reaches the database. The caption beside a photo modifies that plate instead of becoming a second meal — `half of this` halves it, `2 cups of rice` outranks the model's portion, `my usual` cannot also replay a saved routine — and a read too shaky to price asks one focused question while a shaky-but-close one logs a disclosed estimate. Confidence and the model that read the photo are stored with the meal. WhatsApp is now the second
+Phases 0 to 6 are complete. The repository contains a locally runnable LangGraph vertical slice with SQLite persistence, deterministic nutrition reference data, typed meal tools, timezone-correct daily totals, and a CLI. Corrections are written as immutable meal revisions inside one transaction, ambiguous requests ask one focused question instead of guessing, refusals and impossible portions never reach a persisted row, and retried inbound messages are answered from an exactly-once event ledger. A text-model planner implements the same interface as the deterministic one and falls back to it on any unusable output, so the slice still runs without API keys. Memory survives a restart as typed records with confidence and provenance: a stated diet shapes later log replies, a protein or calorie target turns totals into progress, and `my usual` replays a saved routine as a new meal. A changed fact supersedes the one it replaces instead of contradicting it, and retrieval is bounded per kind — one diet, one target per nutrient, a few routines — so no saved habit can evict the facts every reply depends on. A photo takes its own path: bytes are checked against their signature before anything is billed, a dedicated vision model reports only the foods and portions it can separate, and the application prices every line from the reference table, so no model's calorie guess reaches the database. The caption beside a photo modifies that plate instead of becoming a second meal — `half of this` halves it, `2 cups of rice` outranks the model's portion, `my usual` cannot also replay a saved routine — and a read too shaky to price asks one focused question while a shaky-but-close one logs a disclosed estimate. Confidence and the model that read the photo are stored with the meal. WhatsApp is now the second
 transport for the same graph: a signed Cloud API webhook verifies the delivery, normalizes text and
 photo messages into the envelope the CLI already used, acknowledges inside the request thread and
 answers behind it, and replies through the Graph API. An unlisted number never reaches the agent,
-and Meta's retries are the same inbound event rather than a second meal.
+and Meta's retries are the same inbound event rather than a second meal. The claims above are now
+measured rather than asserted: 24 conversation scenarios (the eleven from the brief plus thirteen
+adversarial) and 16 photo scenarios grade tool choice, meal state, totals, clarifications, memory and
+one-meal fusion with no API key and no network; a benchmark reports p50/p95 for cold and warm text and
+image paths at n=40 in a machine-readable file that names whether a provider was in the loop;
+resilience tests cover provider timeouts, refusals and garbage, duplicate concurrent deliveries, and
+unreadable photos; and every turn emits a trace-id'd structured event carrying ids, intents, models
+and durations — never meal text or photo bytes.
 
 Start with:
 
 - [Delivery phases](docs/PHASES.md)
 - [System design](docs/SYSTEM_DESIGN.md)
 - [Requirements traceability](docs/REQUIREMENTS.md)
+- [Eval harness and what it proves](docs/EVALS.md)
 - [Original task brief](docs/brief/AI%20Engineer%20Test%20Task.pdf)
 
 ## Guiding product decisions
@@ -154,9 +162,87 @@ Run the verification suite:
 ruff check .
 mypy src
 pytest --cov=calorai_agent --cov-report=term-missing
+python scripts/run_evals.py
+python scripts/run_photo_evals.py
 ```
 
-Phase 1 deliberately uses a small deterministic food table. This keeps the local slice fast, testable, and free of API keys while the provider-backed structured planner is introduced later.
+## Evals
+
+Two scenario sets, both runnable with no API key and no network:
+
+```bash
+python scripts/run_evals.py          # 11 supplied conversations + 13 adversarial ones
+python scripts/run_evals.py --only correction
+python scripts/run_photo_evals.py    # 16 photographed plates
+```
+
+Every scenario is graded against the database and the trace, not against a transcript: the tool the
+turn chose, the meals it left behind, the day's totals, whether it asked instead of guessing,
+whether a stored memory actually reached the reply, and whether a photo and its caption became one
+meal. [docs/EVALS.md](docs/EVALS.md) defines each of those and states what these evals do not prove.
+
+## Observability
+
+Every turn gets one trace id, and the turns, model calls, media reads and deliveries each log a
+duration:
+
+```bash
+CALORAI_LOG_FORMAT=json calorai-whatsapp --port 8080     # what a log aggregator reads
+calorai --logs INFO "had 2 parathas and chai"            # one turn, traced on a terminal
+```
+
+```text
+2026-09-28T00:18:29.710+00:00 info    trace=fad042bbe1c3 turn status=ok channel=cli redelivered=False route=log_meal photo=False duration_ms=7.21
+Logged 2 paratha, 1 milk chai — about 640 kcal and 15g protein.
+```
+
+The line names no food, no quantity and no caption: this is health data, so logs carry ids,
+intents, models and durations only. `CALORAI_LOG_LEVEL` defaults to `WARNING` so the CLI stays
+quiet between replies, and the webhook raises it to `INFO` in its own entrypoint. Query strings are
+scrubbed from HTTP access logs, because Meta's `hub.challenge` and token parameters are not
+something to archive.
+
+Optional LangSmith tracing is off unless `CALORAI_TRACING=true` **and** `LANGCHAIN_API_KEY` are
+both present; asking for tracing without a key logs why it declined rather than buffering spans to
+upload later.
+
+## Latency
+
+`benchmarks/latency.json` is written by a reproducible command and carries its own environment
+(python, platform, CPU count, commit, sample size, and which model backing produced it):
+
+```bash
+python scripts/benchmark_latency.py --samples 40
+```
+
+Measured on an Apple silicon laptop with no API key, so these are **application overhead** numbers —
+no provider round trip is included, and the result file says so in `model_backing`:
+
+| Path | p50 | p95 | Samples |
+|---|---|---|---|
+| text, cold database | 4.66 ms | 5.16 ms | 40 |
+| text, warm database | 4.97 ms | 5.37 ms | 40 |
+| image, cold database | 4.72 ms | 5.00 ms | 40 |
+| image, warm database | 5.06 ms | 5.53 ms | 40 |
+
+What bought that, and what is still honest to complain about:
+
+- **The model call that never happens.** "how am I doing today?" is read by the rules and answered
+  from the database; the fastest provider request is the one a deterministic read skips. It is also
+  the only path that works with no network and no key.
+- **Concurrency where the work is independent.** Photos in one delivery download in parallel, and a
+  media id is fetched once per delivery no matter how many messages carry it. Answers stay strictly
+  per-message and in order: parallelising the *replies* would let a later correction overtake the
+  message it corrects.
+- **The acknowledged request thread.** Meta is answered with a `200` before any of the above work
+  starts, so provider latency never becomes a retry storm.
+- **Warm is slower than cold here, and that is the point.** A warm database holds the day's meals,
+  so context gathering reads more rows; the gap is small at this scale and it is the shape to watch
+  at production scale.
+- **What is not in these numbers.** With keys set, the dominant term becomes the `model_request`
+  span, which the benchmark reports separately per path. Real user-visible latency is provider time
+  plus the table above; run the command with a key to get the number that means something to a
+  reviewer, and pass `--image` a real plate photo.
 
 ## Repository shape
 

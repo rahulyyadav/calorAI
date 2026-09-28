@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
+from functools import cache
 
 from calorai_agent.domain import Nutrition
 
@@ -87,9 +88,13 @@ ALIASES: dict[str, str] = {
 }
 
 
-def lookup(name: str) -> FoodReference | None:
-    """Resolve a free-text or pluralized food name to its reference row."""
-    cleaned = " ".join(name.lower().strip().split())
+@cache
+def _resolve(cleaned: str) -> FoodReference | None:
+    """The table walk for an already-normalized name. Cached because it is pure and hot.
+
+    Every food in every message, vision answer and alias scan lands here, and the answer cannot
+    change while the process runs — a stale cache is not a thing this function can produce.
+    """
     if cleaned in FOODS:
         return FOODS[cleaned]
     aliased = ALIASES.get(cleaned)
@@ -100,3 +105,8 @@ def lookup(name: str) -> FoodReference | None:
             return candidate
     singular = cleaned[:-1] if cleaned.endswith("s") and not cleaned.endswith("ss") else cleaned
     return FOODS.get(singular) or FOODS.get(ALIASES.get(singular, ""))
+
+
+def lookup(name: str) -> FoodReference | None:
+    """Resolve a free-text or pluralized food name to its reference row."""
+    return _resolve(" ".join(name.lower().strip().split()))

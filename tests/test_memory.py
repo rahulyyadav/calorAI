@@ -470,7 +470,14 @@ def test_memories_reach_the_model_prompt_in_a_bounded_form() -> None:
     planner, client = _model_planner({"intent": "get_totals"})
     memories = [_memory(DietaryConstraint(diet="vegetarian"))] * MEMORY_CONTEXT_LIMIT
 
-    planner.parse(PlannerRequest(text="how am I doing", occurred_at=NOW, memories=tuple(memories)))
+    # Not a plain totals question: those are answered by the rules without a model call at all.
+    planner.parse(
+        PlannerRequest(
+            text="i had chicken biryani, how is that sitting with my diet",
+            occurred_at=NOW,
+            memories=tuple(memories),
+        )
+    )
 
     prompt = client.user_prompts[-1]
     assert "you are vegetarian" in prompt

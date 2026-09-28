@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 import httpx
+
+from calorai_agent.observability import span
+
+logger = logging.getLogger(__name__)
 
 
 class ModelProviderError(RuntimeError):
@@ -51,26 +56,33 @@ class _Endpoint:
             "response_format": {"type": "json_object"},
             "messages": messages,
         }
-        try:
-            with httpx.Client(
-                base_url=f"{self.base_url.rstrip('/')}/",
-                timeout=self.timeout_seconds,
-                transport=self.transport,
-                headers={"Authorization": f"Bearer {self.api_key}"},
-            ) as client:
-                response = client.post("chat/completions", json=payload)
-            response.raise_for_status()
-            body: dict[str, Any] = response.json()
-        except httpx.HTTPError as error:
-            raise ModelProviderError(f"{label} model request failed: {error}") from error
+        # The span carries no prompt: a photo turn's prompt holds what the user said about their
+        # dinner, and a timing log has no reason to carry that to a log aggregator.
+        with span(logger, "model_request", kind=label, model=self.model) as report:
+            try:
+                with httpx.Client(
+                    base_url=f"{self.base_url.rstrip('/')}/",
+                    timeout=self.timeout_seconds,
+                    transport=self.transport,
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                ) as client:
+                    response = client.post("chat/completions", json=payload)
+                response.raise_for_status()
+                body: dict[str, Any] = response.json()
+            except httpx.HTTPError as error:
+                report["failed"] = type(error).__name__
+                raise ModelProviderError(f"{label} model request failed: {error}") from error
 
-        try:
-            content = body["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as error:
-            raise ModelProviderError(f"{label} model returned an unexpected envelope") from error
-        if not isinstance(content, str):
-            raise ModelProviderError(f"{label} model returned non-text content")
-        return content
+            try:
+                content = body["choices"][0]["message"]["content"]
+            except (KeyError, IndexError, TypeError) as error:
+                raise ModelProviderError(
+                    f"{label} model returned an unexpected envelope"
+                ) from error
+            if not isinstance(content, str):
+                raise ModelProviderError(f"{label} model returned non-text content")
+            report["response_chars"] = len(content)
+            return content
 
 
 @dataclass(frozen=True, slots=True)

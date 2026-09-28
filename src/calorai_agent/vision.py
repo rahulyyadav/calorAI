@@ -7,7 +7,6 @@ reference table and fuses it with the caption.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -19,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from calorai_agent.domain import FoodObservation, MediaRef
 from calorai_agent.nutrition import FOODS, lookup
+from calorai_agent.observability import span
 from calorai_agent.policy import MAX_PLAUSIBLE_QUANTITY, UNUSABLE_QUANTITY_CONFIDENCE
 from calorai_agent.providers import (
     ImagePayload,
@@ -75,24 +75,22 @@ class LocalFileMediaSource:
     """Reads a photo the CLI was given a path to. WhatsApp media ids arrive in Phase 5."""
 
     def fetch(self, media: MediaRef) -> ImagePayload:
-        if media.source != "local_path":
-            raise MediaError(f"I cannot read a {media.source} attachment from here yet.")
-        path = Path(media.locator).expanduser()
-        if not path.is_file():
-            raise MediaError(f"there is no image file at {path}.")
-        if path.stat().st_size > MAX_IMAGE_BYTES:
-            megabytes = MAX_IMAGE_BYTES // (1024 * 1024)
-            raise MediaError(f"that image is larger than the {megabytes} MB I can look at.")
-        data = path.read_bytes()
-        mime = sniff_image(data)
-        if mime is None:
-            raise MediaError("that file is not a jpeg, png, or webp image.")
-        logger.debug("media %s read as %s (%s bytes)", _digest(data), mime, len(data))
-        return ImagePayload(data=data, mime_type=mime)
-
-
-def _digest(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()[:12]
+        with span(logger, "media_fetch", kind="local_path", media_id=media.external_id) as report:
+            if media.source != "local_path":
+                raise MediaError(f"I cannot read a {media.source} attachment from here yet.")
+            path = Path(media.locator).expanduser()
+            if not path.is_file():
+                raise MediaError(f"there is no image file at {path}.")
+            if path.stat().st_size > MAX_IMAGE_BYTES:
+                megabytes = MAX_IMAGE_BYTES // (1024 * 1024)
+                raise MediaError(f"that image is larger than the {megabytes} MB I can look at.")
+            data = path.read_bytes()
+            mime = sniff_image(data)
+            if mime is None:
+                raise MediaError("that file is not a jpeg, png, or webp image.")
+            report["bytes"] = len(data)
+            report["mime_type"] = mime
+            return ImagePayload(data=data, mime_type=mime)
 
 
 class _ObservedLine(BaseModel):

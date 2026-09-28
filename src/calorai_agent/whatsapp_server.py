@@ -13,16 +13,18 @@ from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import parse_qs, urlparse
 
 from calorai_agent.config import Settings
-from calorai_agent.domain import InboundMessage
+from calorai_agent.domain import InboundMessage, MediaRef
 from calorai_agent.graph import MealAgent
+from calorai_agent.observability import log_event, log_level_from_env, span, trace_scope
 from calorai_agent.repository import MealRepository
 from calorai_agent.tools import RecordInboundInput
 from calorai_agent.whatsapp import (
     CHANNEL,
+    MAX_MEDIA_PER_DELIVERY,
     GraphClient,
     WebhookBatch,
     WhatsAppError,
@@ -47,6 +49,16 @@ Body = tuple[int, str]
 # reading it into RAM before verifying it is the cheapest denial of service available on an open
 # HTTPS endpoint.
 MAX_WEBHOOK_BODY_BYTES = 1_000_000
+
+# How many photos one delivery downloads at once. A batch is already on a worker thread, so this
+# is a ceiling on sockets and RAM rather than on usefulness: no real delivery carries more.
+MAX_PARALLEL_MEDIA_FETCHES = 4
+
+
+class MediaPrefetcher(Protocol):
+    """Something that can start a photo download early, and never raises doing it."""
+
+    def prefetch(self, media: MediaRef) -> None: ...
 
 
 class InlineExecutor:
@@ -90,6 +102,7 @@ class WebhookApplication:
         timezone: str = "UTC",
         allowed_users: frozenset[str] = frozenset(),
         executor: Any = None,
+        media: MediaPrefetcher | None = None,
     ) -> None:
         self.agent = agent
         self.client = client
@@ -101,6 +114,9 @@ class WebhookApplication:
         # The default is the production one on purpose: an inline default would silently turn a
         # slow model into a retry storm, and only a test should opt out of the worker.
         self.executor = executor if executor is not None else WorkerExecutor()
+        # The same media source the vision pipeline reads through, so a photo warmed here is the
+        # photo the turn finds already downloaded.
+        self.media = media
 
     def get(self, query: Mapping[str, list[str]]) -> Body:
         """Meta's subscription handshake: one exact challenge echo, or a refusal."""
@@ -131,8 +147,36 @@ class WebhookApplication:
         for sender in refused:
             logger.warning("ignored %s message(s) from unlisted sender %s", CHANNEL, sender)
         if not batch.empty:
-            self.executor.submit(lambda: self.answer(batch))
+            self.executor.submit(lambda: self.deliver(batch))
         return 200, "ok"
+
+    def deliver(self, batch: WebhookBatch) -> None:
+        """Everything that happens behind the acknowledgement, on one thread and under one trace."""
+        with trace_scope():
+            self.prefetch(batch)
+            self.answer(batch)
+
+    def prefetch(self, batch: WebhookBatch) -> None:
+        """Download the delivery's photos together, before any turn asks for its own.
+
+        Each message is otherwise read on its user's thread, so on a two-plate delivery the second
+        photo waits behind the first plate's model call — a round trip of nothing but waiting. The
+        downloads are independent, so they run side by side and land in the cache the turns read.
+        """
+        photos: list[MediaRef] = []
+        for message in batch.messages:
+            if message.media is not None:
+                photos.append(message.media)
+            if len(photos) == MAX_MEDIA_PER_DELIVERY:
+                break
+        if self.media is None or not photos:
+            return
+        if len(photos) == 1:
+            self.media.prefetch(photos[0])
+            return
+        with ThreadPoolExecutor(max_workers=min(len(photos), MAX_PARALLEL_MEDIA_FETCHES)) as pool:
+            list(pool.map(self.media.prefetch, photos))
+        log_event(logger, "media_prefetched", photos=len(photos))
 
     def answer(self, batch: WebhookBatch) -> None:
         """Do the work behind the acknowledgement: every meal, then every honest decline.
@@ -158,15 +202,17 @@ class WebhookApplication:
             stop()
 
     def _answer_message(self, message: InboundMessage) -> None:
-        self._seen(message)
-        try:
-            self.repository.ensure_user(message.user_id, self.timezone)
-            reply = self.agent.handle(message)
-        except Exception:  # noqa: BLE001 - the user deserves to know it did not land
-            logger.exception("agent failed for message %s", message.external_id)
-            reply = INTERNAL_FAILURE_REPLY
-            self._close_failed_turn(message, reply)
-        self._send(message.user_id, reply)
+        with span(logger, "message_answered", message_id=message.external_id) as report:
+            report["photo"] = message.media is not None
+            self._seen(message)
+            try:
+                self.repository.ensure_user(message.user_id, self.timezone)
+                reply = self.agent.handle(message)
+            except Exception:  # noqa: BLE001 - the user deserves to know it did not land
+                logger.exception("agent failed for message %s", message.external_id)
+                reply = INTERNAL_FAILURE_REPLY
+                self._close_failed_turn(message, reply)
+            self._send(message.user_id, reply)
 
     def _close_failed_turn(self, message: InboundMessage, reply: str) -> None:
         """Finish the ledger row a failed turn left open.
@@ -332,9 +378,12 @@ def main() -> int:
         )
         return 2
 
-    from calorai_agent.app import create_whatsapp_app  # late import: --help stays cheap
+    from calorai_agent.app import create_whatsapp_app, prepare_runtime  # late: --help stays cheap
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    # A webhook has no terminal in front of it, so its trace is the only way to watch a turn. An
+    # explicit CALORAI_LOG_LEVEL still wins, including when the reviewer wants it quieter.
+    settings = replace(settings, log_level=log_level_from_env("INFO"))
+    prepare_runtime(settings)
     application = create_whatsapp_app(settings)
     host = args.host or settings.webhook_host
     port = args.port or settings.webhook_port

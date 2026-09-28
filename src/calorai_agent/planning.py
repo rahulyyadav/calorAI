@@ -350,6 +350,9 @@ class _Mention:
 _UNUSABLE_MENTION = _Mention(Decimal(1), explicit=True, usable=False)
 _DENIED_MENTION = _Mention(Decimal(1), explicit=True, usable=False, denied=True)
 
+# The articles that double as the number one, and so need a food after them to be a portion.
+_ARTICLES = ("a", "an")
+
 # Every amount the message spells out, used to spot a number no food claimed.
 _STATED_NUMBER = re.compile(
     r"\b(?:\d+(?:[./]\d+)?|" + "|".join(NUMBER_WORDS) + r")\b", re.IGNORECASE
@@ -396,6 +399,15 @@ def _is_list_question(text: str) -> bool:
     return any(phrase in text for phrase in LIST_QUESTION_PHRASES)
 
 
+def _pure_read(text: str) -> ParsedMessage | None:
+    """A question whose whole answer is a number or a list the application already has."""
+    if _is_totals_question(text):
+        return ParsedMessage(intent=AgentIntent.GET_TOTALS, reference=_reference(text))
+    if _is_list_question(text):
+        return ParsedMessage(intent=AgentIntent.LIST_MEALS, reference=_reference(text))
+    return None
+
+
 def meal_ask_hint(text: str) -> AgentIntent | None:
     """A request about a meal already on the record, read off the words rather than the intent.
 
@@ -439,10 +451,9 @@ class RuleBasedPlanner:
         remembered = self._stated_memory(request, text)
         if remembered is not None:
             return remembered
-        if _is_totals_question(text):
-            return ParsedMessage(intent=AgentIntent.GET_TOTALS, reference=_reference(text))
-        if _is_list_question(text):
-            return ParsedMessage(intent=AgentIntent.LIST_MEALS, reference=_reference(text))
+        read = _pure_read(text)
+        if read is not None:
+            return read
         if _contains(text, DELETE_WORDS):
             return ParsedMessage(
                 intent=AgentIntent.DELETE_MEAL,
@@ -479,6 +490,19 @@ class RuleBasedPlanner:
         if _contains(text, REPEAT_WORDS):
             return self._repeat(request, (), text)
         return self._without_items(text)
+
+    def deterministic_read(self, request: PlannerRequest) -> ParsedMessage | None:
+        """A totals or meal-list question the rules answer without any model.
+
+        Both answers are computed from the database, so a model can only be asked to notice the
+        wording — on the most-asked question in the product, at the cost of a round trip. The
+        guards below run in `parse`'s own order, so a message taken on this fast path is read
+        identically on both planner paths; anything that is not a pure read returns None.
+        """
+        text = _normalize_amounts(" ".join(request.text.lower().strip().split()))
+        if _is_food_nutrition_question(text) or self._stated_memory(request, text) is not None:
+            return None
+        return _pure_read(text)
 
     def _stated_memory(self, request: PlannerRequest, text: str) -> ParsedMessage | None:
         """A message whose whole point is a durable fact the agent should keep.
@@ -902,9 +926,18 @@ def _items_from(mentions: dict[str, _Mention], hedged: bool, text: str) -> list[
 
 
 def _has_unclaimed_amount(text: str, mentions: dict[str, _Mention]) -> bool:
+    """True when the message states an amount that no priced food answers to.
+
+    Only an article in front of a food states a portion. The `a` in "for a snack" names the
+    occasion, and counting it as a portion leaves "had a banana for a snack" with a number
+    nobody claimed, which asks the user how many bananas they ate.
+    """
     claimed = [mention.quantity for mention in mentions.values() if mention.usable]
     for match in _STATED_NUMBER.finditer(text):
-        value = _number_value(match.group(0))
+        raw = match.group(0)
+        if raw.lower() in _ARTICLES and not _FOOD_PATTERN.match(text[match.end() :].lstrip()):
+            continue
+        value = _number_value(raw)
         if value is None:
             continue
         if value in claimed:

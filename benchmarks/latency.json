@@ -1,0 +1,81 @@
+{
+  "generated_at": "2026-09-28T00:09:33+00:00",
+  "command": "python scripts/benchmark_latency.py",
+  "samples": 40,
+  "warm_up": 5,
+  "environment": {
+    "python": "3.13.3",
+    "platform": "Darwin 27.0.0",
+    "machine": "arm64",
+    "cpus": 8,
+    "git_commit": "737a77d",
+    "database": "sqlite",
+    "text_model": "rule-based planner",
+    "vision_model": "scripted-stand-in",
+    "model_backing": {
+      "text": "deterministic stand-in (no API key)",
+      "vision": "scripted stand-in (no API key)"
+    },
+    "note": "Stand-in numbers are application overhead only: no provider round trip is included. Re-run with API keys for user-visible latency."
+  },
+  "results": {
+    "text_cold": {
+      "samples": 40,
+      "p50_ms": 4.66,
+      "p95_ms": 5.16,
+      "min_ms": 4.53,
+      "max_ms": 6.05,
+      "mean_ms": 4.76,
+      "routes": {
+        "log_meal": 40
+      },
+      "components": {}
+    },
+    "text_warm": {
+      "samples": 40,
+      "p50_ms": 4.97,
+      "p95_ms": 5.37,
+      "min_ms": 4.6,
+      "max_ms": 5.38,
+      "mean_ms": 5.01,
+      "routes": {
+        "log_meal": 40
+      },
+      "components": {}
+    },
+    "image_cold": {
+      "samples": 40,
+      "p50_ms": 4.72,
+      "p95_ms": 5.0,
+      "min_ms": 4.64,
+      "max_ms": 5.69,
+      "mean_ms": 4.78,
+      "routes": {
+        "log_meal": 40
+      },
+      "components": {
+        "media_fetch": {
+          "p50_ms": 0.05,
+          "p95_ms": 0.06
+        }
+      }
+    },
+    "image_warm": {
+      "samples": 40,
+      "p50_ms": 5.06,
+      "p95_ms": 5.53,
+      "min_ms": 4.66,
+      "max_ms": 5.68,
+      "mean_ms": 5.07,
+      "routes": {
+        "log_meal": 40
+      },
+      "components": {
+        "media_fetch": {
+          "p50_ms": 0.05,
+          "p95_ms": 0.06
+        }
+      }
+    }
+  }
+}

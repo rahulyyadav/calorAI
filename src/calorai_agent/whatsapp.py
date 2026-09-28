@@ -11,7 +11,9 @@ import hashlib
 import hmac
 import json
 import logging
-from collections.abc import Mapping
+import threading
+from collections import OrderedDict
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -19,6 +21,7 @@ from typing import Any
 import httpx
 
 from calorai_agent.domain import InboundMessage, MediaRef
+from calorai_agent.observability import log_event, span
 from calorai_agent.providers import ImagePayload
 from calorai_agent.vision import MAX_IMAGE_BYTES, MediaError, sniff_image
 
@@ -27,6 +30,10 @@ logger = logging.getLogger(__name__)
 SIGNATURE_PREFIX = "sha256="
 CHANNEL = "whatsapp"
 SYNTHETIC_EVENT_PREFIX = "wamid-sha:"
+# How many downloaded photos the process holds, and how many it will fetch for one delivery.
+# Both are ceilings on the same thing: a photo is up to 8 MB of someone's dinner held in RAM.
+MAX_CACHED_MEDIA_BYTES = 32 * 1024 * 1024
+MAX_MEDIA_PER_DELIVERY = 6
 # One day of slack for clock skew, and no more: a stamp further ahead is not a send time, and a
 # meal dated into another century quietly leaves every totals question and recent-meal window.
 MAX_SENT_AHEAD_SECONDS = 86_400
@@ -343,23 +350,101 @@ class GraphClient:
         return self.request("GET", url=link).content
 
 
+class MediaCache:
+    """Photos this process has already paid to download, kept under a hard ceiling.
+
+    A WhatsApp media id names one immutable object, so a cached payload cannot go stale; the only
+    thing it can do is grow, which is what the byte budget is for. The lock covers the dictionary
+    and never a download, so warming three photos at once really does download three at once.
+    Photos are the user's dinner, so nothing here outlives the process and nothing here is logged.
+    """
+
+    def __init__(self, *, max_bytes: int = MAX_CACHED_MEDIA_BYTES) -> None:
+        self._entries: OrderedDict[str, ImagePayload] = OrderedDict()
+        self._bytes = 0
+        self._max_bytes = max_bytes
+        self._lock = threading.Lock()
+
+    def get_or_fetch(self, key: str, fetch: Callable[[], ImagePayload]) -> ImagePayload:
+        """The photo under `key`, downloaded through `fetch` only if nobody has it yet."""
+        with self._lock:
+            cached = self._entries.get(key)
+            if cached is not None:
+                return cached
+        payload = fetch()
+        with self._lock:
+            # Two threads can fetch the same photo while the cache is cold, and whoever finishes
+            # second overwrites the first. A duplicate download is the cost; a torn payload is not.
+            self._entries[key] = payload
+            self._bytes += len(payload.data)
+            self._trim()
+        return payload
+
+    def warm(self, key: str, fetch: Callable[[], ImagePayload]) -> bool:
+        """Fetch into the cache for later, reporting whether the bytes landed in it."""
+        try:
+            self.get_or_fetch(key, fetch)
+        except MediaError as error:
+            # The turn that needs this photo will fetch it itself and hear the truth from it.
+            log_event(
+                logger,
+                "media_prefetch_failed",
+                level=logging.WARNING,
+                media_id=key,
+                reason=str(error),
+            )
+            return False
+        return True
+
+    def _trim(self) -> None:
+        while self._entries and self._bytes > self._max_bytes:
+            _, oldest = self._entries.popitem(last=False)
+            self._bytes -= len(oldest.data)
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._entries)
+
+    def __contains__(self, key: object) -> bool:
+        with self._lock:
+            return key in self._entries
+
+
 class WhatsAppMediaSource:
     """Turns a WhatsApp media id into validated photo bytes, with the same gates as a local file."""
 
-    def __init__(self, client: GraphClient) -> None:
+    def __init__(self, client: GraphClient, *, cache: MediaCache | None = None) -> None:
         self.client = client
+        self.cache = cache
 
     def fetch(self, media: MediaRef) -> ImagePayload:
-        if media.source != "whatsapp_media":
-            raise MediaError(f"I cannot read a {media.source} attachment from the WhatsApp server.")
-        try:
-            data = self.client.download(media.locator)
-        except WhatsAppError as error:
-            raise MediaError("it could not be downloaded from WhatsApp") from error
-        if len(data) > MAX_IMAGE_BYTES:
-            megabytes = MAX_IMAGE_BYTES // (1024 * 1024)
-            raise MediaError(f"that image is larger than the {megabytes} MB I can look at.")
-        mime = sniff_image(data)
-        if mime is None:
-            raise MediaError("that file is not a jpeg, png, or webp image.")
-        return ImagePayload(data=data, mime_type=mime)
+        if self.cache is None:
+            return self._read(media)
+        return self.cache.get_or_fetch(media.locator, lambda: self._read(media))
+
+    def prefetch(self, media: MediaRef) -> None:
+        """Download a photo this delivery is going to need, before the turn asks for it.
+
+        A warm-up cannot fail a user: a photo that will not download is fetched again by the turn
+        that needs it, which then gives the same honest answer it would have given anyway.
+        """
+        if self.cache is not None and media.source == "whatsapp_media":
+            self.cache.warm(media.locator, lambda: self._read(media))
+
+    def _read(self, media: MediaRef) -> ImagePayload:
+        with span(logger, "media_fetch", kind="whatsapp_media", media_id=media.locator) as report:
+            if media.source != "whatsapp_media":
+                raise MediaError(f"I cannot read a {media.source} attachment from WhatsApp.")
+            try:
+                data = self.client.download(media.locator)
+            except WhatsAppError as error:
+                raise MediaError("it could not be downloaded from WhatsApp") from error
+            if len(data) > MAX_IMAGE_BYTES:
+                megabytes = MAX_IMAGE_BYTES // (1024 * 1024)
+                raise MediaError(f"that image is larger than the {megabytes} MB I can look at.")
+            mime = sniff_image(data)
+            if mime is None:
+                raise MediaError("that file is not a jpeg, png, or webp image.")
+            report["bytes"] = len(data)
+            report["mime_type"] = mime
+            return ImagePayload(data=data, mime_type=mime)

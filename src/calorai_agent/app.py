@@ -5,6 +5,7 @@ from calorai_agent.db import Database
 from calorai_agent.domain import MediaRef
 from calorai_agent.graph import MealAgent
 from calorai_agent.llm_planner import ModelPlanner
+from calorai_agent.observability import configure_logging, configure_tracing
 from calorai_agent.planning import MessagePlanner, RuleBasedPlanner
 from calorai_agent.policy import AmbiguityPolicy
 from calorai_agent.providers import (
@@ -20,8 +21,19 @@ from calorai_agent.vision import (
     MediaSource,
     VisionInterpreter,
 )
-from calorai_agent.whatsapp import GraphClient, WhatsAppMediaSource
+from calorai_agent.whatsapp import GraphClient, MediaCache, WhatsAppMediaSource
 from calorai_agent.whatsapp_server import WebhookApplication
+
+
+def prepare_runtime(settings: Settings) -> Settings:
+    """Install logging and optional tracing once, at the process entrypoint.
+
+    Returns the settings so a caller can keep building from one object; a library that configured
+    logging at import time would own the test runner's output along with everything else.
+    """
+    configure_logging(fmt=settings.log_format, level=settings.log_level)
+    configure_tracing(enabled=settings.tracing, project=settings.tracing_project)
+    return settings
 
 
 def build_planner(settings: Settings) -> MessagePlanner:
@@ -59,6 +71,13 @@ class EitherMediaSource:
             raise MediaError("WhatsApp media needs the Graph access token to be configured.")
         return self.whatsapp.fetch(media)
 
+    def prefetch(self, media: MediaRef) -> None:
+        """Warm a photo the delivery will ask for. A local file is already as warm as it gets."""
+        source = self.whatsapp if media.source != "local_path" else self.local
+        prefetch = getattr(source, "prefetch", None)
+        if callable(prefetch):
+            prefetch(media)
+
 
 def build_graph_client(settings: Settings) -> GraphClient | None:
     """The Meta sender is configured only once a token and a number id both exist."""
@@ -72,14 +91,15 @@ def build_graph_client(settings: Settings) -> GraphClient | None:
     )
 
 
-def build_media_source(settings: Settings) -> MediaSource:
+def build_media_source(settings: Settings) -> EitherMediaSource:
     graph = build_graph_client(settings)
     return EitherMediaSource(
-        LocalFileMediaSource(), WhatsAppMediaSource(graph) if graph is not None else None
+        LocalFileMediaSource(),
+        WhatsAppMediaSource(graph, cache=MediaCache()) if graph is not None else None,
     )
 
 
-def build_vision(settings: Settings) -> VisionInterpreter | None:
+def build_vision(settings: Settings, media: MediaSource | None = None) -> VisionInterpreter | None:
     """A photo needs its own model. Without one the CLI says so instead of guessing a plate."""
     if not settings.use_vision or settings.vision_model_api_key is None:
         return None
@@ -89,7 +109,11 @@ def build_vision(settings: Settings) -> VisionInterpreter | None:
         base_url=settings.vision_model_base_url,
         timeout_seconds=settings.request_timeout_seconds,
     )
-    return VisionInterpreter(client, build_media_source(settings), model=settings.vision_model)
+    return VisionInterpreter(
+        client,
+        media if media is not None else build_media_source(settings),
+        model=settings.vision_model,
+    )
 
 
 def build_repository(settings: Settings) -> MealRepository:
@@ -125,11 +149,14 @@ def create_whatsapp_app(settings: Settings) -> WebhookApplication:
     if settings.whatsapp_verify_token is None or settings.whatsapp_app_secret is None:
         raise RuntimeError("WhatsApp needs CALORAI_WHATSAPP_VERIFY_TOKEN and _APP_SECRET.")
     repository = build_repository(settings)
+    # Photos are only worth warming when there is a model to read them. One media source serves
+    # both halves: the delivery prefetches into it, the vision pipeline reads back out of it.
+    media = build_media_source(settings) if settings.use_vision else None
     return WebhookApplication(
         MealAgent(
             build_planner(settings),
             MealTools(repository),
-            vision=build_vision(settings),
+            vision=build_vision(settings, media),
         ),
         graph,
         verify_token=settings.whatsapp_verify_token,
@@ -137,4 +164,5 @@ def create_whatsapp_app(settings: Settings) -> WebhookApplication:
         repository=repository,
         timezone=settings.default_timezone,
         allowed_users=frozenset(settings.whatsapp_allowed_users),
+        media=media,
     )

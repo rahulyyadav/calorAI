@@ -14,10 +14,11 @@ transport for the same graph: a signed Cloud API webhook verifies the delivery, 
 photo messages into the envelope the CLI already used, acknowledges inside the request thread and
 answers behind it, and replies through the Graph API. An unlisted number never reaches the agent,
 and Meta's retries are the same inbound event rather than a second meal. The claims above are now
-measured rather than asserted: 24 conversation scenarios (the eleven from the brief plus thirteen
+measured rather than asserted: 26 conversation scenarios (the eleven from the brief plus fifteen
 adversarial) and 16 photo scenarios grade tool choice, meal state, totals, clarifications, memory and
-one-meal fusion with no API key and no network; a benchmark reports p50/p95 for cold and warm text and
-image paths at n=40 in a machine-readable file that names whether a provider was in the loop;
+one-meal fusion with no API key and no network; a benchmark reports p50/p95 for the cold and warm
+text, read and image paths at n=40, with the model requests each turn billed and the machine load
+recorded, in a machine-readable file that names whether a provider was in the loop;
 resilience tests cover provider timeouts, refusals and garbage, duplicate concurrent deliveries, and
 unreadable photos; and every turn emits a trace-id'd structured event carrying ids, intents, models
 and durations — never meal text or photo bytes.
@@ -171,7 +172,7 @@ python scripts/run_photo_evals.py
 Two scenario sets, both runnable with no API key and no network:
 
 ```bash
-python scripts/run_evals.py          # 11 supplied conversations + 13 adversarial ones
+python scripts/run_evals.py          # 11 supplied conversations + 15 adversarial ones
 python scripts/run_evals.py --only correction
 python scripts/run_photo_evals.py    # 16 photographed plates
 ```
@@ -209,7 +210,8 @@ upload later.
 ## Latency
 
 `benchmarks/latency.json` is written by a reproducible command and carries its own environment
-(python, platform, CPU count, commit, sample size, and which model backing produced it):
+(python, platform, CPU count, commit, the machine's 1-minute load average, sample size, how many
+model requests each turn billed, and which model backing produced it):
 
 ```bash
 python scripts/benchmark_latency.py --samples 40
@@ -218,27 +220,49 @@ python scripts/benchmark_latency.py --samples 40
 Measured on an Apple silicon laptop with no API key, so these are **application overhead** numbers —
 no provider round trip is included, and the result file says so in `model_backing`:
 
-| Path | p50 | p95 | Samples |
-|---|---|---|---|
-| text, cold database | 4.66 ms | 5.16 ms | 40 |
-| text, warm database | 4.97 ms | 5.37 ms | 40 |
-| image, cold database | 4.72 ms | 5.00 ms | 40 |
-| image, warm database | 5.06 ms | 5.53 ms | 40 |
+| Path | p50 | p95 | Model calls per turn | Samples |
+|---|---|---|---|---|
+| text, cold database | 4.69 ms | 6.22 ms | 0.0 | 40 |
+| text, warm database | 5.01 ms | 5.49 ms | 0.0 | 40 |
+| totals/list read, cold | 4.22 ms | 4.85 ms | 0.0 | 40 |
+| totals/list read, warm | 4.18 ms | 4.82 ms | 0.0 | 40 |
+| image, cold database | 4.76 ms | 5.14 ms | 0.0 | 40 |
+| image, warm database | 5.14 ms | 5.75 ms | 0.0 | 40 |
+
+"Cold" is the first turn on a database file the process created and had never opened. Opening that
+file is part of the cold path but not part of the turn, so the artifact reports it on its own
+(`setup_p50_ms`, 10.2–10.5 ms here) rather than hiding it inside a percentile or letting a reader
+assume it was included. The file also names the commit the timings came from, or `-dirty` if the
+working tree was not that commit when they were taken.
+
+The load average is the reason any of this is readable. It is sampled at both ends of the run and
+reported as the worse of the two: three runs at load 1.7–2.3 on 8 CPUs agreed within 0.25 ms at p50 on
+every path, while a run taken while the machine sat at load 11.6 was up to 1 ms slower at p50 and
+produced a 10.6 ms p95 for a path that measures 4.8 ms quietly. Same code, same 40 samples, different
+machine.
 
 What bought that, and what is still honest to complain about:
 
 - **The model call that never happens.** "how am I doing today?" is read by the rules and answered
-  from the database; the fastest provider request is the one a deterministic read skips. It is also
-  the only path that works with no network and no key.
+  from the database, and the `model_calls_per_sample` column is how that is checked rather than
+  asserted: a read turn bills zero. The read rows are also the cheapest in the table, about 0.5 ms
+  under the cold text row on the same run — but with no key configured the alternative was never
+  going to be billed either, so these rows show what the read path *costs*, not what it saves. Set a
+  key and re-run for the saving, which is the whole provider round trip.
 - **Concurrency where the work is independent.** Photos in one delivery download in parallel, and a
   media id is fetched once per delivery no matter how many messages carry it. Answers stay strictly
   per-message and in order: parallelising the *replies* would let a later correction overtake the
   message it corrects.
 - **The acknowledged request thread.** Meta is answered with a `200` before any of the above work
   starts, so provider latency never becomes a retry storm.
-- **Warm is slower than cold here, and that is the point.** A warm database holds the day's meals,
-  so context gathering reads more rows; the gap is small at this scale and it is the shape to watch
-  at production scale.
+- **Warm is not reliably faster than cold here, and at 5 ms that is noise, not a finding.** SQLite
+  page-cache and allocator state dominate a measurement this small: the two read rows are a wash
+  (4.18 vs 4.22 ms) while `image_warm` sits 0.38 ms over `image_cold`, same machine, same 40 samples.
+  The gap worth watching is the one that grows with the data, which is context gathering over a
+  longer day.
+- **One stall in forty.** `text_cold` has a 13.01 ms max behind a 6.22 ms p95 on the run above. At
+  this scale that is the OS, not the application, and it is why the headline is a percentile rather
+  than a mean.
 - **What is not in these numbers.** With keys set, the dominant term becomes the `model_request`
   span, which the benchmark reports separately per path. Real user-visible latency is provider time
   plus the table above; run the command with a key to get the number that means something to a

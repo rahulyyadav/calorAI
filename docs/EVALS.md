@@ -44,7 +44,7 @@ directory, then grades the six dimensions above.
 
 | Set | Runner | Cases | Covers |
 |---|---|---|---|
-| `evals/conversation_scenarios.json` | `scripts/run_evals.py` | 11 supplied + 13 adversarial | the brief's conversation set verbatim, then the ways it breaks |
+| `evals/conversation_scenarios.json` | `scripts/run_evals.py` | 11 supplied + 15 adversarial | the brief's conversation set verbatim, then the ways it breaks |
 | `evals/photo_scenarios.json` | `scripts/run_photo_evals.py` | 16 | vision reads, caption fusion, unreadable plates, absurd portions |
 
 The adversarial cases exist because the supplied set is the easy half: a correction with nothing to

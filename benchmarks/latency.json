@@ -1,14 +1,22 @@
 {
-  "generated_at": "2026-09-28T00:09:33+00:00",
-  "command": "python scripts/benchmark_latency.py",
+  "generated_at": "2026-09-28T02:00:50+00:00",
+  "command": "--samples 40",
   "samples": 40,
   "warm_up": 5,
+  "definitions": {
+    "text": "a meal logged from words, end to end",
+    "read": "a totals or meal-list question, which the rules settle from the database",
+    "image": "a photo and its caption, priced from the reference table",
+    "cold": "the first turn on a database file this process created and had never opened; opening it is reported separately as setup_p50_ms/setup_p95_ms and is not inside the turn percentiles",
+    "warm": "a turn on a database that has already answered this many turns"
+  },
   "environment": {
     "python": "3.13.3",
     "platform": "Darwin 27.0.0",
     "machine": "arm64",
     "cpus": 8,
-    "git_commit": "737a77d",
+    "load_average_1m": 2.33,
+    "git_commit": "5fcc7ed",
     "database": "sqlite",
     "text_model": "rule-based planner",
     "vision_model": "scripted-stand-in",
@@ -16,40 +24,75 @@
       "text": "deterministic stand-in (no API key)",
       "vision": "scripted stand-in (no API key)"
     },
-    "note": "Stand-in numbers are application overhead only: no provider round trip is included. Re-run with API keys for user-visible latency."
+    "note": "Stand-in numbers are application overhead only: no provider round trip is included, and with no key the model call the read path skips was never going to be billed here, so the read rows show what that route costs rather than what it saves. Re-run with API keys for user-visible latency and for the saving."
   },
   "results": {
     "text_cold": {
       "samples": 40,
-      "p50_ms": 4.66,
-      "p95_ms": 5.16,
-      "min_ms": 4.53,
-      "max_ms": 6.05,
-      "mean_ms": 4.76,
+      "p50_ms": 4.69,
+      "p95_ms": 6.22,
+      "min_ms": 4.36,
+      "max_ms": 13.01,
+      "mean_ms": 5.1,
+      "model_calls_per_sample": 0.0,
+      "routes": {
+        "log_meal": 40
+      },
+      "components": {},
+      "setup_p50_ms": 10.18,
+      "setup_p95_ms": 12.79
+    },
+    "text_warm": {
+      "samples": 40,
+      "p50_ms": 5.01,
+      "p95_ms": 5.49,
+      "min_ms": 4.61,
+      "max_ms": 5.6,
+      "mean_ms": 5.04,
+      "model_calls_per_sample": 0.0,
       "routes": {
         "log_meal": 40
       },
       "components": {}
     },
-    "text_warm": {
+    "read_cold": {
       "samples": 40,
-      "p50_ms": 4.97,
-      "p95_ms": 5.37,
-      "min_ms": 4.6,
-      "max_ms": 5.38,
-      "mean_ms": 5.01,
+      "p50_ms": 4.22,
+      "p95_ms": 4.85,
+      "min_ms": 4.03,
+      "max_ms": 5.32,
+      "mean_ms": 4.31,
+      "model_calls_per_sample": 0.0,
       "routes": {
-        "log_meal": 40
+        "get_totals": 30,
+        "list_meals": 10
+      },
+      "components": {},
+      "setup_p50_ms": 10.4,
+      "setup_p95_ms": 11.42
+    },
+    "read_warm": {
+      "samples": 40,
+      "p50_ms": 4.18,
+      "p95_ms": 4.82,
+      "min_ms": 3.92,
+      "max_ms": 6.8,
+      "mean_ms": 4.3,
+      "model_calls_per_sample": 0.0,
+      "routes": {
+        "list_meals": 10,
+        "get_totals": 30
       },
       "components": {}
     },
     "image_cold": {
       "samples": 40,
-      "p50_ms": 4.72,
-      "p95_ms": 5.0,
-      "min_ms": 4.64,
-      "max_ms": 5.69,
-      "mean_ms": 4.78,
+      "p50_ms": 4.76,
+      "p95_ms": 5.14,
+      "min_ms": 4.59,
+      "max_ms": 6.07,
+      "mean_ms": 4.87,
+      "model_calls_per_sample": 0.0,
       "routes": {
         "log_meal": 40
       },
@@ -58,15 +101,18 @@
           "p50_ms": 0.05,
           "p95_ms": 0.06
         }
-      }
+      },
+      "setup_p50_ms": 10.52,
+      "setup_p95_ms": 11.33
     },
     "image_warm": {
       "samples": 40,
-      "p50_ms": 5.06,
-      "p95_ms": 5.53,
-      "min_ms": 4.66,
-      "max_ms": 5.68,
-      "mean_ms": 5.07,
+      "p50_ms": 5.14,
+      "p95_ms": 5.75,
+      "min_ms": 4.65,
+      "max_ms": 6.33,
+      "mean_ms": 5.2,
+      "model_calls_per_sample": 0.0,
       "routes": {
         "log_meal": 40
       },

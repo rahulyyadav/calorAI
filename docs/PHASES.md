@@ -201,7 +201,7 @@ instead, with no key and no network.
 
 **Meta setup note:** a Meta developer app and business portfolio/WhatsApp Business Account are the important Cloud API resources. A Facebook Page may be useful for the broader business presence, but the architecture must not couple meal logging to a Page object. We will verify the exact dashboard flow against the account UI during this phase because Meta changes onboarding screens frequently.
 
-## Phase 6 - Evals, latency, resilience, and observability
+## Phase 6 - Evals, latency, resilience, and observability (complete)
 
 **Outcome:** claims are backed by measurements.
 
@@ -214,8 +214,8 @@ instead, with no key and no network.
 
 **Evidence:** reproducible benchmark command and machine-readable result file.
 
-Implemented evidence: 402 tests pass at 95.14% package coverage with strict mypy clean on 22 source
-files, ruff check and format clean, 16/16 photo scenarios and 24/24 conversation scenarios green —
+Implemented evidence: 418 tests pass at 95% package coverage with strict mypy clean on 22 source
+files, ruff check and format clean, 16/16 photo scenarios and 26/26 conversation scenarios green —
 all with no API key and no network, so a reviewer can reproduce every claim on a clean clone.
 `observability.py` gives each turn a trace id from a contextvar and emits four event types: `turn`
 (channel, route, photo, redelivered, duration_ms), `model_request` (kind, model, failed,
@@ -225,7 +225,7 @@ the database. Logs render as text for the CLI or JSON for a collector, and LangS
 only when `CALORAI_TRACING` and a key are *both* present — enabling tracing without a key reports
 "untraced" instead of buffering spans to send somewhere later.
 `evals/conversation_scenarios.json` carries all eleven conversations from the brief verbatim plus
-thirteen adversarial cases, and `scripts/run_evals.py` grades each on the five dimensions the brief
+fifteen adversarial cases, and `scripts/run_evals.py` grades each on the five dimensions the brief
 asks about: tool choice, meal state, totals, clarification behavior, memory use, and single-meal
 multimodal fusion. Grading reads routes from the application's own trace, meals and totals from the
 repository, memory kinds from active records, and fusion from the vision client's call count — so a
@@ -234,16 +234,26 @@ scenario can span day offsets and timezones, rebuild the agent mid-run to prove 
 memory, redeliver one event to prove exactly-once, and assert the number of vision calls, which is
 how "one photo plus its caption is one meal" is measured rather than claimed. `docs/EVALS.md`
 records the semantics and, honestly, what these evals do not prove.
-`scripts/benchmark_latency.py` measures cold and warm text and image paths at 40 samples each and
-writes `benchmarks/latency.json` with sample size, environment, p50 and p95 — and a `model_backing`
-field naming that both models were stand-ins, because a 5 ms number without that label is
-misreadable as a provider result. Measured on Apple Silicon/Darwin with 8 CPUs: text cold 4.66/5.16
-ms, text warm 4.97/5.37 ms, image cold 4.72/5.00 ms, image warm 5.06/5.53 ms p50/p95. Warm running
-slower than cold is the honest shape of a 5 ms measurement: SQLite page cache and allocator state
-dominate at this scale, and the fast paths below are what keep the number in milliseconds at all —
-`RuleBasedPlanner.deterministic_read` answers totals and "what did I eat" without a model call, the
-nutrition walk is `functools.cache`d, photo bytes are fetched in parallel per delivery through a
-byte-bounded `MediaCache` keyed on the media id. `tests/test_resilience.py` covers the failure side:
+`scripts/benchmark_latency.py` measures cold and warm text, read, and image paths at 40 samples each
+and writes `benchmarks/latency.json` with sample size, environment (including the machine's 1-minute
+load average, sampled at both ends of the run and reported as the worse, because a 5 ms number timed
+during a contact-indexing burst is a different number), p50 and p95, how many model requests each path
+billed, and a `model_backing` field naming that both models were stand-ins — a 5 ms figure without
+that label is misreadable as a provider result. The commit field says `-dirty` when the measured tree
+was not the commit it names.
+Measured on Apple Silicon/Darwin with 8 CPUs at load 2.33: text cold 4.69/6.22 ms, text warm
+5.01/5.49 ms, read cold 4.22/4.85 ms, read warm 4.18/4.82 ms, image cold 4.76/5.14 ms, image warm
+5.14/5.75 ms p50/p95, each with 0.0 model calls per turn, and the cold paths reporting database setup
+separately at 10.2-10.5 ms p50 rather than hidden inside a percentile. The same command run at load
+11.6 was about 1 ms slower at p50 with a 10.6 ms read p95, which is what the field is for. Warm
+running no faster than cold is the honest shape of a 5 ms measurement: SQLite page cache and allocator
+state dominate at this scale.
+What keeps the numbers in milliseconds at all is the fast paths — `RuleBasedPlanner.deterministic_read`
+answers totals and "what did I eat" without a model call, which the artifact now proves by billing
+0.0 model requests per read turn instead of asserting it; the nutrition walk is a bounded
+`functools.lru_cache`, bounded because the names arriving in it are model output; and photo bytes are
+fetched in parallel per delivery through a byte-bounded `MediaCache` keyed on the media id.
+`tests/test_resilience.py` covers the failure side:
 a timeout, refused connection, 500, 429, malformed JSON or prose instead of JSON from the provider
 each still logs the meal through the deterministic fallback, a model that invents `calories: 9000`
 cannot put 9000 in the database (the row holds the 520 the reference table prices, and the reply
@@ -257,6 +267,35 @@ guard against absurd amounts, and a regression test holds it. Known boundary: th
 planner cannot name a food the table cannot price, so "a protein bar and a smoothie" logs the
 smoothie and stays silent about the bar, while the model-backed path discloses it — recorded in
 `docs/EVALS.md` and in that scenario's own claim rather than hidden.
+
+Independent review of this phase found two ways the application lost a meal it had already been
+given, and both are now pinned by tests and evals rather than by prose. A question that also stated a
+portion — "what did I eat today? i also had 2 parathas for breakfast" — was read as only the
+question, so the parathas were never logged and the reply said nothing was logged; the list read now
+refuses any message that states an amount, and it refuses an amount too large to believe as well, so
+the impossible portion surfaces as a question instead of vanishing. Reviewing that rule also exposed
+its neighbour: "did I eat biryani today?" was answering by logging a biryani, inventing the very meal
+the user was asking about. Behind the webhook, a photo download that failed for a reason nobody
+modelled (a `httpx.InvalidURL` from a base URL without a scheme, not a `MediaError`) escaped the
+warm-up, ended the worker, and left an already-acknowledged delivery unanswered with no Meta retry
+ever coming — the warm-up now swallows anything, the delivery logs how many photos it actually got,
+and a discarded worker future reports itself instead of dying silently. The privacy rule outlived
+the two rounds it had already survived: a rejected vision answer was quoting the model's description
+of the plate into the log, and refusal lines were filing a blocked stranger's phone number at the
+default level, so both now report a class name or a stable digest — enough to correlate one sender,
+not enough to become a contact list. A media cache that added one photo's bytes twice was evicting
+the other dinners to pay for it. The benchmark could not support the claims made of it: the committed
+artifact predated every file it was cited as measuring, timed only `log_meal` turns, and called the
+path "cold" while excluding the cold cost, so it was rebuilt from the code it describes with the read
+path added, model calls counted per turn, database setup reported separately, and load average
+recorded —
+then regenerated again, because the first regeneration was itself timed during a load-11.6 burst and
+the artifact said nothing about it. Load is now sampled at both ends of the run and reported as the
+worse of the two, and the commit field gains a `-dirty` suffix when the measured tree is not the
+commit it names, so an artifact cannot claim to describe a commit it did not run from.
+Trace ids now cross the parallel-fetch pool, `span()` cannot be crashed by a field the measured work
+wrote into the dict it was handed, and text log values are quoted so a reason with spaces in it is
+still one field.
 
 ## Phase 7 - Submission polish and interview rehearsal
 
